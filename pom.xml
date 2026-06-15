@@ -125,7 +125,7 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
-            <version>2.13.2</version>
+            <version>2.22.0</version>
         </dependency>
 
         <!-- CVE-2020-8908, CVE-2023-2976 (Insecure temp directory + path traversal) -->
