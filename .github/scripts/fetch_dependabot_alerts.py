@@ -49,7 +49,7 @@ SEVERITY_COLORS = {
 }
 
 COLUMNS = [
-    "Service", "Repo", "Alert #", "Severity", "CVE ID",
+    "Service", "Repo", "Alert #", "Severity", "GHSA ID", "CVE ID",
     "Package", "Vulnerable Range", "Safe Version",
     "Manifest", "Scope", "Summary", "Alert URL",
     "Jira Key", "Jira Status"   # filled later by Sub-Agent 3
@@ -99,6 +99,7 @@ def fetch_alerts(repo: str) -> list[dict]:
                 "repo":             repo,
                 "alert_number":     a["number"],
                 "severity":         adv.get("severity", "unknown").lower(),
+                "ghsa_id":          adv.get("ghsa_id", "N/A"),
                 "cve_id":           adv.get("cve_id", "N/A"),
                 "package":          a["dependency"]["package"]["name"],
                 "vulnerable_range": vuln.get("vulnerable_version_range", ""),
@@ -155,7 +156,7 @@ def export_excel(alerts: list[dict], filename: str) -> str:
         fill  = PatternFill("solid", fgColor=color)
         values = [
             a["service"], a["repo"], a["alert_number"],
-            a["severity"].upper(), a["cve_id"], a["package"],
+            a["severity"].upper(), a.get("ghsa_id", "N/A"), a["cve_id"], a["package"],
             a["vulnerable_range"], a["safe_version"],
             a["manifest"], a["scope"], a["summary"],
             a["alert_url"], a["jira_key"], a["jira_status"],
@@ -167,8 +168,8 @@ def export_excel(alerts: list[dict], filename: str) -> str:
 
     for col_i in range(1, len(COLUMNS) + 1):
         ws.column_dimensions[get_column_letter(col_i)].width = 22
-    ws.column_dimensions["K"].width = 50  # Summary
-    ws.column_dimensions["L"].width = 60  # Alert URL
+    ws.column_dimensions["L"].width = 50  # Summary
+    ws.column_dimensions["M"].width = 60  # Alert URL
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
 
