@@ -11,23 +11,40 @@ Your only job is to run the fetch script and confirm the Excel file was created.
 
 ## Steps
 
-### 1. Install dependencies
-```bash
-pip install requests openpyxl
-```
-
-### 2. Run the script
+### 1. Run the fetch script
 ```bash
 python .github/scripts/fetch_dependabot_alerts.py
 ```
 
-### 3. Verify output
+- If it fails with a `ModuleNotFoundError` → install only the missing packages, then retry:
+  ```bash
+  pip install requests openpyxl
+  python .github/scripts/fetch_dependabot_alerts.py
+  ```
+- Any other error → STOP and report the exact error to the orchestrator
+
+### 2. Verify output
 - Confirm a file named `dependabot_alerts_<timestamp>.xlsx` was created
 - Confirm it has data rows (not just a header)
 - If the file is missing or empty → STOP and report to orchestrator
 
-## Output to pass to @w1-sorter
-- Excel file path (full path including filename)
+### 3. Run the sorter script
+Once the Excel file is confirmed, run:
+```bash
+python .github/scripts/sort_dependabot_alerts.py <excel_file_path>
+```
+
+- If it fails with a `ModuleNotFoundError` → install only the missing packages, then retry:
+  ```bash
+  pip install openpyxl
+  python .github/scripts/sort_dependabot_alerts.py <excel_file_path>
+  ```
+- Any other error → STOP and report the exact error to the orchestrator
+- Confirm a `_grouped.json` file was created alongside the Excel file
+
+## Output to pass to @w1-jira-manager
+- Excel file path (updated, sorted)
+- Grouped JSON file path (`dependabot_alerts_<timestamp>_grouped.json`)
 - Total number of alerts fetched
 - Count per severity (CRITICAL / HIGH / MEDIUM / LOW)
 

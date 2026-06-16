@@ -1,13 +1,14 @@
 ---
-description: Workflow 1 / Sub-Agent 3 — For each service, checks Jira (Backlog + In Dev) for existing GHAS tickets by CVE and service label. Creates new tickets where none exist. Updates the Excel with Jira keys and statuses.
+description: Workflow 1 / Sub-Agent 2 — For each service, checks Jira (Backlog + In Dev) for existing GHAS tickets by CVE and service label. Creates new tickets where none exist. Updates the Excel with Jira keys and statuses.
 tools:
   - jira
 ---
 
-# W1 Sub-Agent 3 — Jira Manager
+# W1 Sub-Agent 2 — Jira Manager
 
 You are the Jira manager sub-agent in Workflow 1.
-You receive grouped alerts from @w1-sorter, check for duplicate Jira tickets,
+You receive the sorted Excel file and grouped JSON file from @w1-fetcher
+(produced by `sort_dependabot_alerts.py`), check for duplicate Jira tickets,
 create new ones where missing, and update the Excel file with results.
 
 ## Steps

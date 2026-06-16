@@ -17,6 +17,23 @@ Usage:
 
 import os
 import sys
+import subprocess
+
+def _ensure_packages(*packages: str) -> None:
+    """Install packages only if they are not already importable."""
+    missing = []
+    for pkg in packages:
+        import importlib
+        try:
+            importlib.import_module(pkg.split("[")[0].replace("-", "_"))
+        except ModuleNotFoundError:
+            missing.append(pkg)
+    if missing:
+        print(f"[INFO] Installing missing packages: {', '.join(missing)}")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
+
+_ensure_packages("requests", "openpyxl", "python-dotenv")
+
 import requests
 from datetime import datetime
 from openpyxl import Workbook

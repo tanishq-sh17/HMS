@@ -24,14 +24,13 @@ Ask the user:
 
 Delegate to sub-agents in this exact order:
 
-1. **@w1-fetcher** — Run the fetch script, get the Excel file
-2. **@w1-sorter** — Sort and group the Excel by service + severity
-3. **@w1-jira-manager** — Dedup against Jira, create tickets, update Excel
+1. **@w1-fetcher** — Run the fetch script, run the sorter script, get the Excel + grouped JSON files
+2. **@w1-jira-manager** — Dedup against Jira, create tickets, update Excel
 
 Wait for each sub-agent to complete before moving to the next.
 If any sub-agent fails → stop, report which one failed and why. Do not proceed.
 
-After all 3 complete, collect:
+After both complete, collect:
 - Excel file path
 - Services with NEW Jira tickets created → pass to Workflow 2 if mode is "both"
 
