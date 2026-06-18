@@ -141,6 +141,41 @@
             <artifactId>gson</artifactId>
             <version>2.8.5</version>
         </dependency>
+
+        <!-- CVE-2022-42889 (Text4Shell — RCE via StringSubstitutor interpolation) -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-text</artifactId>
+            <version>1.9</version>
+        </dependency>
+
+        <!-- CVE-2022-1471 (SnakeYAML — RCE via unsafe deserialization of arbitrary Java objects) -->
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+            <version>1.30</version>
+        </dependency>
+
+        <!-- CVE-2021-42392, CVE-2022-23221 (H2 Console — unauthenticated RCE via JNDI) -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <version>1.4.200</version>
+        </dependency>
+
+        <!-- CVE-2021-39139, CVE-2021-40690 (XStream — RCE via unsafe type processing) -->
+        <dependency>
+            <groupId>com.thoughtworks.xstream</groupId>
+            <artifactId>xstream</artifactId>
+            <version>1.4.17</version>
+        </dependency>
+
+        <!-- CVE-2021-43797 (Netty — HTTP request smuggling via whitespace mishandling) -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-all</artifactId>
+            <version>4.1.72.Final</version>
+        </dependency>
     </dependencies>
 
     <build>
