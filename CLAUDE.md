@@ -36,6 +36,7 @@ mvn clean compile
 |---|---|
 | Swagger UI | `http://localhost:8080/api/v1/swagger-ui/index.html` |
 | OpenAPI JSON | `http://localhost:8080/api/v1/api-docs` |
+| Actuator health | `http://localhost:8080/api/v1/actuator/health` |
 
 All non-auth endpoints require `Authorization: Bearer <token>`. Get a token via `POST /api/v1/auth/login`.
 
@@ -64,7 +65,7 @@ Cross-cutting: `common` (BaseEntity, ApiResponse, enums), `exception`, `security
 
 **BaseEntity** (`common/entity/BaseEntity.java`) — all entities extend this. It provides `createdAt`, `updatedAt`, `createdBy`, `updatedBy` via Spring Data JPA auditing. `AuditConfig` resolves the current auditor from the Spring Security context.
 
-**MapStruct + Lombok interaction** — entities use `@Builder`, but Lombok's `@Builder` does not include fields inherited from `BaseEntity`. As a result, all `toEntity()` mapper methods must include `@BeanMapping(builder = @Builder(disableBuilder = true))` to force MapStruct to use setters instead of the builder. Omitting this causes a compile error (`Unknown property "createdAt" in result type XxxBuilder`).
+**MapStruct + Lombok interaction** — entities use `@Builder`, but Lombok's `@Builder` does not include fields inherited from `BaseEntity`. As a result, all `toEntity()` mapper methods must include `@BeanMapping(builder = @Builder(disableBuilder = true))` to force MapStruct to use setters instead of the builder. Omitting this causes a compile error (`Unknown property "createdAt" in result type XxxBuilder`). MapStruct is configured with `defaultComponentModel=spring` — all mapper interfaces are injected as Spring beans.
 
 **JWT flow** — `JwtAuthenticationFilter` extracts the Bearer token, validates it via `JwtTokenProvider` (JJWT 0.12.x API), loads `UserPrincipal` from `CustomUserDetailsService`, and sets the `SecurityContext`. Roles are stored as `ROLE_<ENUM_NAME>` (e.g. `ROLE_ADMIN`). Method-level security (`@PreAuthorize`) uses `hasRole('ADMIN')` which matches against the `ROLE_` prefix automatically.
 
@@ -108,6 +109,8 @@ Business code formats:
 
 **Security roles** — `ADMIN`, `DOCTOR`, `RECEPTIONIST`, `PATIENT`. Public endpoints: `/auth/**`, Swagger paths, `/actuator/**`. Use `hasRole('ADMIN')` (not `hasAuthority('ROLE_ADMIN')`) in `@PreAuthorize`.
 
+**Enums** — all enum fields on entities are persisted as `EnumType.STRING`.
+
 ## Intentionally vulnerable dependencies
 
 This is a GHAS/Dependabot demo project. The following dependencies are declared in `pom.xml` to generate Dependabot alerts and are **not used in application code**:
@@ -128,52 +131,72 @@ All tests are service-layer unit tests using Mockito (`@ExtendWith(MockitoExtens
 
 ## GHAS Vulnerability Management
 
-### Jira Configuration
+### Prerequisites
+
+**GitHub CLI** — run `gh auth login` once (no token file needed; `fetch_alerts.sh` uses keyring auth).
+
+**Jira API** — `jira_helper.py` (`.claude/scripts/jira_helper.py`) requires:
+1. `pip install requests python-dotenv` (one-time setup)
+2. Fill in `.env` at repo root:
+   ```
+   JIRA_URL=https://tanishqshrivas.atlassian.net   # also accepts JIRA_BASE_URL
+   JIRA_EMAIL=<your-atlassian-account-email>
+   JIRA_API_TOKEN=<your-atlassian-api-token>
+   ```
+3. Verify auth: `python .claude/scripts/jira_helper.py search --jql "project=HMS AND labels=GHAS"`
+
+### Fixed Configuration (hardcoded in all agents — never ask the user)
 
 | Setting | Value |
 |---|---|
+| Repo | `tanishq-sh17/HMS` |
 | Jira Site URL | `https://tanishqshrivas.atlassian.net` |
 | Jira Project Key | `HMS` |
+| Repo root | `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS` |
 
 ### Multi-Agent Orchestration
 
-A two-workflow, multi-agent system lives in `.github/agents/` for automated Dependabot vulnerability remediation.
+A two-workflow, multi-agent system lives in `.github/agents/` (mirrored in `.claude/agents/`) for automated Dependabot vulnerability remediation.
 
 ```
-.github/
-  agents/
-    alert-ingestion-orchestrator.md   ← entry point for Workflow 1
-    w1-fetcher.md                     ← runs fetch script, produces Excel
-    w1-sorter.md                      ← groups alerts by service
-    w1-jira-manager.md                ← Jira dedup check + ticket creation
-    vuln-resolver-orchestrator.md     ← entry point for Workflow 2
-    w2-context-builder.md             ← fetches alerts + parses pom.xml
-    w2-fixer.md                       ← patches pom.xml (CRITICAL first)
-    w2-validator.md                   ← mvn compile + test + smoke check
-    w2-reporter.md                    ← produces end-to-end report
-  scripts/
-    fetch_dependabot_alerts.py        ← GitHub REST API → sorted, color-coded Excel
+.claude/
+  agents/                             ← canonical agent definitions (used by Claude Code)
+    alert-ingestion-orchestrator.md
+    w1-fetcher.md
+    w1-sorter.md
+    w1-jira-manager.md
+    vuln-resolver-orchestrator.md
+    w2-context-builder.md
+    w2-fixer.md
+    w2-validator.md
+    w2-reporter.md
+  scripts/                            ← scripts invoked by agents
+    fetch_alerts.sh                   ← active: gh CLI → timestamped CSV (all alert types)
+    fetch_dependabot_alerts.py        ← legacy: Dependabot only, Excel output
+
+.github/agents/                       ← mirror of .claude/agents/ (kept in sync)
 ```
 
 ### Workflow 1 — Alert Ingestion
 
-1. `w1-fetcher` runs `fetch_dependabot_alerts.py` — fetches, sorts, and exports to Excel (requires `GITHUB_TOKEN` in `.env`)
-2. `w1-sorter` reads the Excel and groups alerts by service
-3. `w1-jira-manager` searches Jira by `GHAS` + service label — skips if found, creates one consolidated ticket per service if not; updates Excel with Jira key + status
+Steps run in order; any failure stops the workflow.
 
-**Excel columns:** Service | Repo | Alert # | Severity | CVE ID | Package | Vulnerable Range | Safe Version | Manifest | Scope | Summary | Alert URL | **Jira Key** | **Jira Status**
+1. **`w1-fetcher`** — runs `fetch_alerts.sh` via Git Bash using `gh` CLI (no `.env` token needed — run `gh auth login` once); fetches Dependabot, Code Scanning, and Secret Scanning alerts; writes a timestamped CSV to the repo root
+2. **`w1-sorter`** — reads the CSV, groups alerts by service into a dict; does NOT re-sort (already sorted by the script)
+3. **`w1-jira-manager`** — for each service, JQL-searches Jira (`project=HMS AND labels=GHAS AND labels=<SERVICE>`); skips if open ticket found, otherwise creates **one consolidated ticket per service** (all CVEs combined); updates CSV with Jira key + status
+
+**Jira ticket title format:** `Address GHAS vulnerabilities for <SERVICE_NAME> [Critical-<N>, High-<N>, Medium-<N>, Low-<N>]`
+
+**CSV columns (0-indexed):** `service` | `type` | `ghsa_id` | `cve_id` | `title` | `severity` | `created` | `due` | `url` | `Application` | `nonCompliant` | `ageDays` | **`jira_key`** | **`jira_status`**
 
 ### Workflow 2 — Vulnerability Resolver
 
-Fix strategy rules enforced by `w2-fixer`:
-- **Property-backed versions** (`${some.version}`) → update `<properties>` block only — one change covers all usages (preferred)
-- **Inline versions** → update `<version>` tag directly
-- **BOM-managed** (no `<version>` tag) → skip, noted in report
-- Sibling groups (`jjwt-*`, `log4j-*`, `jackson-*`) must always share the same version — when fixing one, update all siblings
+Only input needed: **Jira ticket ID** (e.g. `HMS-16`); everything else is fixed config. Steps run in order; any failure stops the workflow.
 
-Validation order in `w2-validator`: `mvn dependency:tree` → `mvn compile` → `mvn test` → `spring-boot:run` health check. Individual failing fixes are reverted, not the whole file.
-
-`w2-reporter` produces a full end-to-end report covering: alerts scanned, fixes applied, validation results, reverted fixes, and flagged concerns.
+1. **`w2-context-builder`** — uses GitHub MCP (`list_dependabot_alerts`, `get_file_contents`) to fetch open alerts and `pom.xml`; also reads the latest CSV for compliance/Code Scanning/Secret Scanning context; classifies each dependency as inline / property-backed / BOM-managed; audits sibling group consistency for `jjwt-*`, `log4j-*`, `jackson-*`
+2. **`w2-fixer`** — applies fixes CRITICAL first; property-backed preferred (one `<properties>` change covers all usages); updates all siblings in a group when fixing one; multiple CVEs on same package → use highest required safe version
+3. **`w2-validator`** — per-dependency `mvn dependency:tree` check first (adds `<dependencyManagement>` override if transitive pull detected); then `mvn compile` → `mvn test` → `spring-boot:run` health check at `/actuator/health`; reverts individual failing fixes only, never the whole file
+4. **`w2-reporter`** — compiles full end-to-end report (Dependabot fixes + Code Scanning + Secret Scanning summary); posts report as Jira comment; transitions ticket to Done / In Review based on outcome; **does not raise a PR**
 
 ### Dependabot Schedule
 

@@ -36,6 +36,8 @@ mvn clean compile
 | OpenAPI JSON | `http://localhost:8080/api/v1/api-docs` |
 | Actuator health | `http://localhost:8080/api/v1/actuator/health` |
 
+> ⚠️ `spring-boot-starter-actuator` is **not** declared in `pom.xml`. The actuator URL above will return 404 unless you add it. The `w2-validator` smoke check falls back to the Swagger UI (HTTP 200) as a workaround.
+
 All non-auth endpoints require `Authorization: Bearer <token>`. Get a token via `POST /api/v1/auth/login`.
 
 ---
@@ -142,7 +144,7 @@ A two-workflow, multi-agent system lives in `.github/agents/` for automated Depe
 
 ```
 .github/
-  agents/
+  agents/          ← loaded by GitHub Copilot CLI (@agent-name syntax)
     alert-ingestion-orchestrator.md   ← entry point for Workflow 1
     w1-fetcher.md                     ← runs fetch_alerts.sh, produces CSV
     w1-sorter.md                      ← groups alerts by service
@@ -155,7 +157,12 @@ A two-workflow, multi-agent system lives in `.github/agents/` for automated Depe
   scripts/
     fetch_alerts.sh                   ← active: gh CLI → timestamped CSV (all alert types)
     fetch_dependabot_alerts.py        ← legacy: Dependabot only → Excel output
+
+.claude/
+  agents/          ← mirror of .github/agents/, loaded by Claude Code (claude.ai/code)
 ```
+
+> **Two-folder setup**: `.github/agents/` is loaded by GitHub Copilot CLI; `.claude/agents/` is the identical mirror loaded by Claude Code. Keep them in sync manually when modifying agent definitions.
 
 **Invoke via Copilot Chat:**
 ```
@@ -194,8 +201,18 @@ This is a GHAS/Dependabot demo project. The following dependencies are declared 
 | `jackson-databind` | 2.13.2 | CVE-2020-36518, CVE-2022-42003, CVE-2022-42004 |
 | `guava` | 29.0-jre | CVE-2020-8908, CVE-2023-2976 |
 | `gson` | 2.8.5 | CVE-2022-25647 |
+| `commons-text` | 1.9 | CVE-2022-42889 (Text4Shell — RCE via StringSubstitutor interpolation) |
+| `snakeyaml` | 1.30 | CVE-2022-1471 (RCE via unsafe deserialization) |
+| `h2` | 1.4.200 | CVE-2021-42392, CVE-2022-23221 (unauthenticated RCE via JNDI) |
+| `xstream` | 1.4.17 | CVE-2021-39139 and 17 others (RCE via unsafe type processing) |
+| `netty-all` | 4.1.72.Final | CVE-2021-43797 (HTTP request smuggling) |
 
 ⚠️ **Do not upgrade these without understanding the GHAS workflow impact** — they exist to drive the multi-agent remediation workflows.
+
+**Known caveats with the newer deps:**
+- `snakeyaml 1.30` overrides Spring Boot's BOM-managed safe version. During Workflow 2 validation, `w2-validator` may need to add a `<dependencyManagement>` override if the fix doesn't take effect transitively.
+- `h2 1.4.200` is declared without `<scope>test</scope>`, placing it on the runtime classpath. Spring Boot may attempt to auto-configure an H2 datasource — watch for startup conflicts during `w2-validator`'s smoke check.
+- `xstream 1.4.17` alone generates ~18 Dependabot alerts due to the large number of individually tracked CVEs.
 
 ### Dependabot Schedule
 Configured in `.github/dependabot.yml` — weekly on Mondays at 09:00 IST, maven ecosystem, max 5 open PRs.
