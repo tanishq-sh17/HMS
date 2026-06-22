@@ -25,6 +25,28 @@ You pass validated results and flagged concerns to @w2-reporter.
 - `REPO_ROOT` — absolute path to the local repo root (e.g. `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS`)
 - Patched pom.xml (already written to `<REPO_ROOT>\pom.xml`)
 - Changes log (list of fixes applied)
+- `CONFIG_PATH` — `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\config\ghas-workflow-config.yml`
+
+---
+
+## Step 0 — Read Config
+
+Before running any validation, read the config to get runtime settings:
+
+```powershell
+Get-Content "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\config\ghas-workflow-config.yml" -Raw
+```
+
+Extract and use:
+- `BUILD_TOOL` — `workflow.build_tool` (default: `maven`)
+- `MVN_CMD` — `workflow.maven_path` (default: `mvn`)
+- `GRADLE_CMD` — `workflow.gradle_path` (default: `./gradlew`)
+- `TEST_CMD` — `workflow.test_command` (null = use default for build tool)
+- `SMOKE_URL` — `workflow.smoke_check_url` (default: `http://localhost:8080/api/v1/actuator/health`)
+- `SMOKE_TIMEOUT` — `workflow.smoke_check_timeout_seconds` (default: `60`)
+
+Use `$MVN_CMD` (or `$GRADLE_CMD`) everywhere below instead of hardcoded `mvn`.
+Use `$SMOKE_URL` for the health check and `$SMOKE_TIMEOUT` for the wait duration.
 
 ---
 
@@ -101,6 +123,10 @@ If MySQL is not running → skip the smoke check entirely, add to flagged concer
 ```powershell
 Set-Location "<REPO_ROOT>"
 
+# Read config values (already loaded in Step 0)
+$smokeUrl     = "http://localhost:8080/api/v1/actuator/health"  # replace with $SMOKE_URL from config
+$smokeTimeout = 60  # replace with $SMOKE_TIMEOUT from config
+
 # Start Spring Boot in background and capture the process
 $proc = Start-Process -FilePath "mvn" `
     -ArgumentList "spring-boot:run" `
@@ -108,13 +134,13 @@ $proc = Start-Process -FilePath "mvn" `
     -RedirectStandardOutput "$env:TEMP\hms-smoke-stdout.txt" `
     -RedirectStandardError  "$env:TEMP\hms-smoke-stderr.txt"
 
-Write-Host "Spring Boot starting (PID $($proc.Id))... waiting 60 seconds"
-Start-Sleep -Seconds 60
+Write-Host "Spring Boot starting (PID $($proc.Id))... waiting $smokeTimeout seconds"
+Start-Sleep -Seconds $smokeTimeout
 
 $healthPassed = $false
 try {
     $response = Invoke-WebRequest `
-        -Uri "http://localhost:8080/api/v1/actuator/health" `
+        -Uri $smokeUrl `
         -UseBasicParsing `
         -TimeoutSec 15 `
         -ErrorAction Stop

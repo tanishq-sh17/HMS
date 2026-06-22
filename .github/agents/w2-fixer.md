@@ -30,9 +30,10 @@ to pom.xml. You then pass the changes log to @w2-validator.
 - Never say "I would run..." or "I cannot run because runCommand is unavailable" — invoke `powershell` and show actual output
 - If a command fails, show the exact error from `powershell` output — never fabricate success
 
-## Input (from @w2-context-builder)
+## Input (from @w2-rca via orchestrator)
 - `REPO_ROOT` — `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS`
-- Full context map (fix plan, pom.xml content, classification, sibling audit)
+- Full context map (fix plan with MINOR/MAJOR classifications, pom.xml content, sibling audit)
+- `APPROVED_FIXES` — list of fix numbers approved by the developer in Step 5 (e.g. `[1, 2, 3]`). **Only apply fixes whose number appears in this list.** Skip all others.
 
 The `pom.xml` to edit is always at `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\pom.xml`.
 
@@ -46,6 +47,8 @@ Before touching anything, read the file to confirm current state:
 Get-Content "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\pom.xml" -Raw
 ```
 Use this output (not the context map's pom copy) as the source of truth for current versions.
+
+**Important:** Only apply fixes that are in the `APPROVED_FIXES` list received from the orchestrator. For each fix NOT in the approved list, log: `SKIPPED (not approved): <package>`. Do not write any changes for unapproved fixes.
 
 ---
 
@@ -128,13 +131,14 @@ Confirm every fixed package shows its new version.
 ---
 
 ## Output to pass to @w2-validator
-- Changes log (list each fix with before → after):
+- Changes log (list each fix with before → after, upgrade type, and approval status):
   ```
-  FIXED   : log4j-core 2.14.1 → 2.17.2 (inline) — CVE-2021-44228
-  FIXED   : log4j-api 2.14.1 → 2.17.2 (inline, sibling consistency)
-  FIXED   : commons-collections 3.2.1 → 3.2.2 (inline) — CVE-2015-7501
-  FIXED   : jackson.version property 2.13.2 → 2.14.2 (property-backed) — CVE-2020-36518, CVE-2022-42003, CVE-2022-42004
-  SKIPPED : spring-core (BOM-managed)
+  FIXED   [MAJOR] : log4j-core 2.14.1 → 2.17.2 (inline) — CVE-2021-44228
+  FIXED   [MINOR] : log4j-api 2.14.1 → 2.17.2 (inline, sibling consistency)
+  FIXED   [MINOR] : commons-collections 3.2.1 → 3.2.2 (inline) — CVE-2015-7501
+  FIXED   [MINOR] : jackson.version property 2.13.2 → 2.14.2 (property-backed) — CVE-2020-36518, CVE-2022-42003, CVE-2022-42004
+  SKIPPED         : spring-core (BOM-managed)
+  SKIPPED         : guava (not approved by developer)
   ```
 - Concerns list (major version bumps, pre-existing mismatches resolved)
 - Confirmation that pom.xml was verified after edits

@@ -33,10 +33,28 @@ You produce a complete context map for @w2-fixer.
 - `REPO` — `tanishq-sh17/HMS`
 - `REPO_ROOT` — `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS`
 - `JIRA_TICKET_ID` — e.g. `HMS-16`
+- `CONFIG_PATH` — `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\config\ghas-workflow-config.yml`
 
 ---
 
 ## Steps
+
+### 0. Read Workflow Configuration
+
+Read the shared config file to get build tool and other settings:
+
+```powershell
+Get-Content "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\config\ghas-workflow-config.yml" -Raw
+```
+
+Extract and store:
+- `BUILD_TOOL` — `workflow.build_tool` (default: `maven`)
+- `AUTO_APPROVE_MINOR` — `workflow.auto_approve_minor` (default: `false`)
+- `AUTO_APPROVE_CRITICAL` — `workflow.auto_approve_critical` (default: `false`)
+
+Pass these values to the orchestrator so it can apply the auto-approval rules in Step 5.
+
+---
 
 ### 1. Fetch Open Dependabot Alerts via gh CLI
 
@@ -48,10 +66,16 @@ gh api "repos/tanishq-sh17/HMS/dependabot/alerts?state=open&per_page=100" --pagi
 
 From the output, build a fix plan table:
 ```
-| # | Package | Vulnerable Range | Safe Version | GHSA | CVE | Severity |
+| # | Package | Vulnerable Range | Current Version | Safe Version | GHSA | CVE | Severity | Upgrade Type |
 ```
 
 Sort by severity: CRITICAL → HIGH → MEDIUM → LOW.
+
+**Upgrade Type classification rule:**
+- **MAJOR** — the first (major) version segment changes (e.g. `1.x → 2.x`, `3.2.1 → 4.0.0`)
+- **MINOR** — only the second or third segment changes (e.g. `2.13.2 → 2.14.2`, `1.9 → 1.10`)
+
+Always determine upgrade type by comparing the **current** version in `pom.xml` (from Step 3) against the safe version. Compute this after Step 3 once pom.xml is read.
 
 **If the command fails with auth error** → stop and tell the user to run `gh auth login`.
 **If output is empty** → report "No open Dependabot alerts found" and stop.
@@ -171,7 +195,7 @@ For each group found in pom.xml, report:
 
 ---
 
-## Output to pass to @w2-fixer
+## Output to pass to @w2-rca (and ultimately @w2-fixer)
 ```
 CONTEXT MAP
 ─────────────────────────────────────────
@@ -179,12 +203,17 @@ Repo         : tanishq-sh17/HMS
 Jira ticket  : <JIRA_TICKET_ID>
 pom.xml      : <full content — do not truncate>
 
+Build config:
+  build_tool           : maven
+  auto_approve_minor   : false
+  auto_approve_critical: false
+
 Fix Plan (sorted by severity):
-  1. [CRITICAL] log4j-core — inline — 2.14.1 → 2.17.2 — CVE-2021-44228      | age=Xd | overdue=1
-  2. [CRITICAL] commons-collections — inline — 3.2.1 → 3.2.2 — CVE-2015-7501 | age=Xd | overdue=1
-  3. [HIGH]     jackson-databind — property(jackson.version) — 2.13.2 → 2.14.2 — CVE-2020-36518, CVE-2022-42003, CVE-2022-42004
-  4. [MEDIUM]   guava — inline — 29.0-jre → 32.0.1-jre — CVE-2023-2976
-  5. [LOW]      gson — inline — 2.8.5 → 2.8.9 — CVE-2022-25647
+  1. [CRITICAL / MAJOR] log4j-core — inline — 2.14.1 → 2.17.2 — CVE-2021-44228      | age=Xd | overdue=1
+  2. [CRITICAL / MINOR] commons-collections — inline — 3.2.1 → 3.2.2 — CVE-2015-7501 | age=Xd | overdue=1
+  3. [HIGH     / MINOR] jackson-databind — property(jackson.version) — 2.13.2 → 2.14.2 — CVE-2020-36518, CVE-2022-42003, CVE-2022-42004
+  4. [MEDIUM   / MAJOR] guava — inline — 29.0-jre → 32.0.1-jre — CVE-2023-2976
+  5. [LOW      / MINOR] gson — inline — 2.8.5 → 2.8.9 — CVE-2022-25647
 
 Skipped (BOM-managed):
   (none — or list packages)

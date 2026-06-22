@@ -86,9 +86,9 @@ Secret Scanning alerts : X
 ────────────────────────────────────────────────────────────────────
 🔧 STEP 2 — FIXES APPLIED (w2-fixer)
 ────────────────────────────────────────────────────────────────────
-| Package | CVE | Severity | Before | After | Fix Type |
-|---------|-----|----------|--------|-------|----------|
-| ...     | ... | ...      | ...    | ...   | ...      |
+| Package | CVE | Severity | Upgrade | Before | After | Fix Type |
+|---------|-----|----------|---------|--------|-------|----------|
+| ...     | ... | ...      | MINOR/MAJOR | ...    | ...   | ...      |
 
 Skipped — BOM-managed (no version to patch):
 | Package | Reason |
