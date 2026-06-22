@@ -38,12 +38,14 @@ At every phase transition, emit a clear status line:
 ✅ Step 2/8 — RCA complete: 5 fixes analysed
 🔄 Step 3/8 — Presenting proposed diff for human approval...
 ✅ Step 3/8 — Approval received: 4 of 5 fixes approved
-🔄 Step 4/8 — Running w2-fixer (applying approved fixes)...
-✅ Step 4/8 — Fixer complete: 4 fixes applied, 1 skipped (not approved)
-🔄 Step 5/8 — Running w2-validator...
-✅ Step 5/8 — Validator complete: all fixes validated
-🔄 Step 6/8 — Running w2-reporter...
-✅ Step 6/8 — Report posted to Jira HMS-XX, ticket transitioned to Done
+🔄 Step 4/8 — Creating feature branch...
+✅ Step 4/8 — Branch created: HMS-16-GHAS-log4j-core-and-3-more
+🔄 Step 5/8 — Running w2-fixer (applying approved fixes)...
+✅ Step 5/8 — Fixer complete: 4 fixes applied, 1 skipped (not approved)
+🔄 Step 6/8 — Running w2-validator...
+✅ Step 6/8 — Validator complete: all fixes validated
+🔄 Step 7/8 — Running w2-reporter...
+✅ Step 7/8 — Report posted to Jira HMS-XX, ticket transitioned to Done
 ```
 
 ## Fixed Configuration (never ask the user for these)
@@ -143,7 +145,43 @@ If the developer approves zero fixes → stop here. Do NOT invoke @w2-fixer.
 
 ---
 
-### Step 5 — @w2-fixer
+### Step 5 — Create Feature Branch
+
+Before any file is modified, create a dedicated git branch for this fix set.
+
+**Branch naming rule:**
+- Format: `<JIRA_TICKET_ID>-GHAS-<primary-package>[-and-N-more]`
+- `<primary-package>` = artifact ID of the most critical (first in fix plan) approved fix, lowercased, with dots replaced by hyphens
+- If only 1 approved fix: `HMS-16-GHAS-log4j-core`
+- If 2+ approved fixes: `HMS-16-GHAS-log4j-core-and-3-more` (where N = remaining count)
+- Strip any characters that are not alphanumeric, hyphens, or dots from the package name
+
+```powershell
+Set-Location "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS"
+
+# Confirm we are on the expected base (main/master)
+git branch --show-current
+
+# Create and switch to the feature branch
+$branchName = "<computed-branch-name>"   # substitute with the computed name above
+git checkout -b $branchName
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: Failed to create branch $branchName"
+    exit 1
+}
+Write-Host "BRANCH_CREATED: $branchName"
+git branch --show-current
+```
+
+**If branch creation fails** (e.g. branch already exists):
+- Try appending `-2`, `-3`, etc. until the name is free
+- If git is not available or the repo is not a git repo → stop and tell the user
+
+Store `FEATURE_BRANCH` = the created branch name. Pass it to @w2-reporter.
+
+---
+
+### Step 6 — @w2-fixer
 Pass: repo root, `CONTEXT_MAP` from Step 1, `APPROVED_FIXES` from Step 4.
 
 Apply only the approved version fixes to `pom.xml` (CRITICAL first); enforce sibling group consistency; handle inline vs property-backed correctly. Tag each fix as [MAJOR] or [MINOR] in the output.
@@ -154,8 +192,8 @@ Capture from its output:
 
 ---
 
-### Step 6 — @w2-validator
-Pass: repo root, `FIXES_APPLIED` from Step 5, config path.
+### Step 7 — @w2-validator
+Pass: repo root, `FIXES_APPLIED` from Step 6, config path.
 
 Run `mvn dependency:tree` → `mvn compile` → `mvn test` → `spring-boot:run` smoke check (using URL and timeout from config). Revert individual failing fixes (never the whole file). Flag reverted fixes for human review.
 
@@ -171,12 +209,13 @@ Capture from its output:
 
 ---
 
-### Step 7 — @w2-reporter
+### Step 8 — @w2-reporter
 Pass everything explicitly:
 - `CONTEXT_MAP` from Step 1
 - `RCA_SUMMARY` from Step 2
-- `FIXES_APPLIED`, `FIXES_SKIPPED` from Step 5
-- `VALIDATION_RESULTS`, `FIXES_REVERTED` from Step 6
+- `FIXES_APPLIED`, `FIXES_SKIPPED` from Step 6
+- `VALIDATION_RESULTS`, `FIXES_REVERTED` from Step 7
+- `FEATURE_BRANCH` from Step 5
 - Service name: `HMS`, Jira ticket ID, Repo
 
 Reporter will:

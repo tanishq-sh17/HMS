@@ -42,6 +42,7 @@ Your jobs in order:
 | Source | Data |
 |--------|------|
 | @w2-context-builder | Alerts scanned, dependency classifications, sibling group audit, CSV enrichment |
+| Orchestrator Step 5 | `FEATURE_BRANCH` — the git branch where fixes were applied |
 | @w2-fixer | Fixes attempted, fix types used, skipped (BOM-managed) |
 | @w2-validator | Validation results per fix, reverted fixes + reasons, final pom.xml state |
 
@@ -55,10 +56,11 @@ Populate every field below with **real data from the sub-agents**. Do not leave 
 ╔══════════════════════════════════════════════════════════════════╗
 ║          WORKFLOW 2 — END-TO-END REPORT                         ║
 ╠══════════════════════════════════════════════════════════════════╣
-║  Service     : HMS                                               ║
-║  Repo        : tanishq-sh17/HMS                                  ║
-║  Jira Ticket : <JIRA_TICKET_ID>                                  ║
-║  Run date    : <YYYY-MM-DD>                                      ║
+║  Service       : HMS                                             ║
+║  Repo          : tanishq-sh17/HMS                                ║
+║  Jira Ticket   : <JIRA_TICKET_ID>                                ║
+║  Feature Branch: <FEATURE_BRANCH>                                ║
+║  Run date      : <YYYY-MM-DD>                                    ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 ────────────────────────────────────────────────────────────────────
@@ -120,6 +122,7 @@ Fixes reverted (individual failures):
 ────────────────────────────────────────────────────────────────────
 📊 SUMMARY
 ────────────────────────────────────────────────────────────────────
+  Feature branch              : <FEATURE_BRANCH>
   Dependabot alerts scanned   : X
   Fixes successfully applied  : X
   Fixes reverted              : X
