@@ -25,14 +25,18 @@ Your job is to run the prebuilt shell script which handles fetching all alert ty
 
 - The `runCommand` tool does NOT exist in this environment — never block, stop, or report it as unavailable
 - Use the `powershell` tool for all PowerShell commands, Python scripts, and `mvn` commands
-- For Git Bash / shell script execution, call `powershell` with: `& "C:\Program Files\Git\bin\bash.exe" -c "<command>"`
+- For Git Bash / shell script execution, call `powershell` with the config-loaded path after Step 0: `& $GIT_BASH -c "<command>"`
 - Never say "I would run..." or "I cannot run because runCommand is unavailable" — invoke `powershell` and show actual output
 - If a command fails, show the exact error from `powershell` output — never fabricate success
 
+## Input (from orchestrator)
+- `CONFIG_PATH` — path to `ghas-workflow-config.yml`
+- All other values are loaded from config in Step 0 below.
+
 ## Prerequisites
-- GitHub CLI (`gh`) must be installed at `C:\Program Files\GitHub CLI\gh.exe`
-- `jq` must be installed at `C:\Users\TanishqShrivas\.local\bin\jq.exe` (or any PATH-visible location)
-- Git Bash must be available (`C:\Program Files\Git\bin\bash.exe`)
+- GitHub CLI must be installed and reachable via the config-loaded `gh` command
+- `jq` must be installed and reachable via the shell environment used by the script
+- Git Bash must be available at the config-loaded path
 - Run `gh auth login` once if not already authenticated — **no `.env` token required**, `gh` manages auth via the keyring
 
 ## Progress Reporting
@@ -60,36 +64,55 @@ If any step fails, emit:
 
 ## Steps
 
+### 0. Load Config
+
+```powershell
+$cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
+$cfg = $cfgJson | ConvertFrom-Json
+
+$REPO_ROOT      = $cfg.environment.repo_root
+$GIT_BASH       = $cfg.tools.git_bash
+$GH_CMD         = $cfg.tools.gh
+$REPO_NAME      = $cfg.environment.repo_name
+$FETCH_SCRIPT   = Join-Path $REPO_ROOT ($cfg.scripts.fetch_alerts -replace '/', '\')
+$CSV_OUT_DIR    = Join-Path $REPO_ROOT $cfg.csv.output_dir
+$SERVICE_NAME   = $cfg.environment.service_name
+$REPO_OWNER     = $cfg.environment.repo_owner
+
+Write-Host "Config loaded: repo_root=$REPO_ROOT  service=$SERVICE_NAME"
+```
+
 ### 1. Verify GitHub CLI authentication
 Run via Git Bash:
 ```bash
-/c/Program\ Files/GitHub\ CLI/gh auth status
+$GH_CMD auth status
 ```
 Look for ✓ `Logged in to github.com` with token scopes including **`repo`** and **`read:org`**.
 
 If not authenticated → STOP and tell the user to run `gh auth login`.
 
 ### 2. Run the script from the repo root using Git Bash
-```bash
-"C:/Program Files/Git/bin/bash.exe" "C:/Users/TanishqShrivas/DummyProj/GHAS-dummy-projects/HMS/.github/scripts/fetch_alerts.sh"
+```powershell
+& $GIT_BASH -c "$GH_CMD auth status"
+& $GIT_BASH -c "$($FETCH_SCRIPT -replace '\\', '/') $CSV_OUT_DIR $SERVICE_NAME $REPO_OWNER $REPO_NAME"
 ```
 
 The script will automatically:
-- Add `C:/Program Files/GitHub CLI` and `~/.local/bin` to PATH if `gh`/`jq` are not found
+- Add GitHub CLI and `jq` to PATH if they are not found
 - **Delete any existing `github_alerts_*.csv` files** from previous runs before writing a fresh one (no accumulation)
 - Fetch all open Dependabot, Code Scanning, and Secret Scanning alerts using `gh api` (no token file needed)
-- Write a single fresh **timestamped** CSV: `github_alerts_YYYYMMDD_HHMMSS.csv` in the repo root
+- Write a single fresh **timestamped** CSV in the configured output directory
 
 ### 3. Resolve the output file path
-The script writes to a timestamped file in the repo root. Resolve the latest one:
+The script writes to a timestamped file in the configured output directory. Resolve the latest one:
 ```powershell
-Get-ChildItem "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\github_alerts_*.csv" | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+Get-ChildItem (Join-Path $CSV_OUT_DIR 'github_alerts_*.csv') | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 ```
 
 ### 4. Verify output
 Count data rows (excluding header):
 ```powershell
-$csv = Get-ChildItem "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\github_alerts_*.csv" | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+$csv = Get-ChildItem (Join-Path $CSV_OUT_DIR 'github_alerts_*.csv') | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 (Get-Content $csv | Select-Object -Skip 1 | Where-Object { $_ -ne "" }).Count
 ```
 - If count > 0 → proceed
@@ -120,4 +143,4 @@ $csv = Get-ChildItem "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\
 ## Failure conditions
 - `gh auth status` fails → stop, tell the user to run `gh auth login`
 - Script throws an error → stop, return the exact error message
-- Output file empty or missing → stop, report "No open alerts found"
+- Output file empty or missing → stop, report `No open alerts found`

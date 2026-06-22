@@ -26,17 +26,14 @@ create **one consolidated ticket per service** (covering all CVEs), and update t
 
 - The `runCommand` tool does NOT exist in this environment — never block, stop, or report it as unavailable
 - Use the `powershell` tool for all PowerShell commands, Python scripts, and `mvn` commands
-- For Git Bash / shell script execution, call `powershell` with: `& "C:\Program Files\Git\bin\bash.exe" -c "<command>"`
+- For Git Bash / shell script execution, call `powershell` with the config-loaded path after Step 0: `& $GIT_BASH -c "<command>"`
 - Never say "I would run..." or "I cannot run because runCommand is unavailable" — invoke `powershell` and show actual output
 - If a command fails, show the exact error from `powershell` output — never fabricate success
 
-## Fixed Configuration (never ask the user for these)
-
-| Setting | Value |
-|---|---|
-| Jira Project Key | `HMS` |
-| Script path | `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\scripts\jira_ticket_manager.py` |
-| Repo root | `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS` |
+## Input (from orchestrator)
+- `CONFIG_PATH` — path to `ghas-workflow-config.yml`
+- `CSV_PATH` — full path from @w1-sorter
+- `SERVICE_NAMES` — grouped service names from @w1-sorter
 
 ## Progress Reporting
 
@@ -66,10 +63,33 @@ If any command fails, emit:
 
 Process one service group at a time.
 
+### 0. Load Config
+
+```powershell
+$cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
+$cfg = $cfgJson | ConvertFrom-Json
+
+$REPO_ROOT        = $cfg.environment.repo_root
+$GIT_BASH         = $cfg.tools.git_bash
+$SERVICE_NAME     = $cfg.environment.service_name
+$JIRA_SCRIPT      = Join-Path $REPO_ROOT ($cfg.scripts.jira_ticket_manager -replace '/', '\')
+$JIRA_PROJECT     = $cfg.jira.project_key
+$JIRA_SITE_URL    = $cfg.jira.site_url
+$BASE_LABEL       = ($cfg.jira.labels | Select-Object -First 1)
+$PRIORITY         = $cfg.jira.priority
+$STORY_POINTS     = $cfg.jira.story_points
+$SKIP_STATUSES    = $cfg.jira.skip_statuses_for_duplicate_check
+$CSV_GLOB         = Join-Path $REPO_ROOT ($cfg.csv.glob_pattern)
+$TICKET_COLUMNS   = $cfg.jira.ticket_table_columns -join ","
+$SUMMARY_TEMPLATE = $cfg.jira.ticket_summary_template
+
+Write-Host "Config loaded: jira=$JIRA_PROJECT  service=$SERVICE_NAME"
+```
+
 ### 1. Resolve the CSV path
 Use the path passed by @w1-sorter. If not provided, resolve the latest:
 ```powershell
-$CSV_PATH = Get-ChildItem "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\github_alerts_*.csv" | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+$CSV_PATH = Get-ChildItem $CSV_GLOB | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 Write-Host "CSV: $CSV_PATH"
 ```
 
@@ -79,21 +99,29 @@ Write-Host "CSV: $CSV_PATH"
 
 Run `jira_ticket_manager.py search` and capture its JSON output:
 ```powershell
-python "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\scripts\jira_ticket_manager.py" `
-  search --project HMS --labels "GHAS,<SERVICE_NAME>"
+python $JIRA_SCRIPT `
+  search --project $JIRA_PROJECT --labels "$BASE_LABEL,<SERVICE_NAME>"
 ```
 
-**Expected output — array of matching tickets (empty = no duplicate):**
-```json
-[]
+**Apply status-aware duplicate logic:**
+
 ```
-or
-```json
-[{"key": "HMS-12", "status": "In Progress", "summary": "..."}]
+For each ticket returned:
+  - If ticket.status IS IN $SKIP_STATUSES → ticket is active → SKIP creation
+  - If ticket.status is NOT in $SKIP_STATUSES → ticket is closed/done → proceed to CREATE
+
+If no tickets returned at all → proceed to CREATE
 ```
 
-- **Array is non-empty** → ticket already exists. Use the first result's `key` as `JIRA_KEY` and set `JIRA_STATUS = SKIPPED`. Do NOT create a new ticket.
-- **Array is empty** → no duplicate found. Proceed to Step 3.
+**Progress output:**
+```
+→ Existing ticket found: HMS-14 (Done) — not in skip-list → CREATING new ticket  # example — actual values from config/runtime
+→ Existing ticket found: HMS-20 (In Dev) — in skip-list → SKIPPING
+→ No existing ticket found → CREATING new ticket
+```
+
+- **Should SKIP** → use first matching ticket's `key` as `JIRA_KEY` and set `JIRA_STATUS = SKIPPED`. Do NOT create a new ticket.
+- **Should CREATE** → proceed to Step 3.
 
 ---
 
@@ -101,13 +129,21 @@ or
 
 Run `jira_ticket_manager.py create` — it reads the CSV, computes severity counts, builds the ADF description, and calls the Jira API:
 ```powershell
-python "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\scripts\jira_ticket_manager.py" `
-  create --project HMS --service "<SERVICE_NAME>" --csv "<CSV_PATH>"
+python $JIRA_SCRIPT `
+  create --project $JIRA_PROJECT --service "<SERVICE_NAME>" --csv "<CSV_PATH>" --priority $PRIORITY --story-points $STORY_POINTS
 ```
+
+Use config-driven metadata while creating tickets:
+- Labels: `"$BASE_LABEL,<SERVICE_NAME>"`
+- Priority: `$PRIORITY`
+- Story points: `$STORY_POINTS`
+- Table columns: `$TICKET_COLUMNS`
+- Summary template: `$SUMMARY_TEMPLATE`
+- Jira site URL reference: `$JIRA_SITE_URL`
 
 **Expected output:**
 ```json
-{"key": "HMS-XX", "summary": "Address GHAS vulnerabilities for HMS [...]", "priority": "Highest"}
+{"key": "HMS-XX", "summary": "Address GHAS vulnerabilities for HMS [...]", "priority": "High"}  // example — actual value from config
 ```
 
 Parse `key` from this JSON — this is `JIRA_KEY`. Set `JIRA_STATUS = CREATED`.
@@ -123,7 +159,8 @@ Run the following once per service (replace `<SERVICE_NAME>`, `<JIRA_KEY>`, `<JI
 python -c "
 import csv, glob, os
 
-files = sorted(glob.glob(r'C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\github_alerts_*.csv'), key=os.path.getmtime, reverse=True)
+SERVICE = '$SERVICE_NAME'
+files = sorted(glob.glob(r'$CSV_GLOB'), key=os.path.getmtime, reverse=True)
 CSV_PATH = files[0] if files else None
 if not CSV_PATH:
     print('ERROR: No github_alerts_*.csv found')
@@ -172,12 +209,12 @@ Total alerts   : X  (Dependabot: X, Code Scanning: X, Secret Scanning: X)
 Severity       : CRITICAL: X, HIGH: X, MEDIUM: X, LOW: X
 
 Jira results (one ticket per service):
-  CREATED : X  → [HMS-XX, ...]
+  CREATED : X  → [HMS-XX, ...]  # example — actual keys come from Jira
   SKIPPED : X  → (duplicate tickets already open)
   FAILED  : X  → (errors if any)
 
 Services with NEW tickets (for Workflow 2):
-  - HMS → HMS-XX
+  - HMS → HMS-XX  # example — actual values come from config/runtime
 ```
 
 ## Rules
@@ -186,3 +223,4 @@ Services with NEW tickets (for Workflow 2):
 - If the search command fails → stop that service, log the real error, continue with next service
 - If ticket creation fails → log the real failure, continue with remaining services
 - Run Step 4 (CSV update) after every service regardless of CREATED or SKIPPED status
+- Use only config-loaded Jira values for project, labels, priority, story points, and duplicate-status logic

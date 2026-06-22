@@ -18,15 +18,65 @@ Wait for each sub-agent to complete before starting the next. Pass outputs betwe
 - If a sub-agent fails → stop immediately, surface the exact error, do not proceed
 - Every value you report in the final summary MUST come from actual sub-agent output
 
-## Fixed Configuration (never ask the user for these)
+## Configuration
 
-| Setting | Value |
-|---|---|
-| Repo root | `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS` |
-| fetch_alerts.sh | `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\scripts\fetch_alerts.sh` |
-| jira_ticket_manager.py | `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\scripts\jira_ticket_manager.py` |
-| Jira Project Key | `HMS` |
-| Jira Site URL | `https://tanishqshrivas.atlassian.net` |
+This orchestrator is fully driven by the shared YAML config file.
+The config file path is the **only** value that needs to be set before running.
+
+**Config file location (conventional path — do not change unless you move the file):**
+```
+<repo_root>\.github\config\ghas-workflow-config.yml
+```
+
+Auto-detect the repo root and config path:
+```powershell
+Set-Location "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS"
+$REPO_ROOT = & "C:\Program Files\Git\bin\bash.exe" -c "git rev-parse --show-toplevel" 2>$null
+if (-not $REPO_ROOT) { $REPO_ROOT = (Get-Location).Path }
+$REPO_ROOT = $REPO_ROOT.Trim() -replace '/', '\'
+$CONFIG_PATH = "$REPO_ROOT\.github\config\ghas-workflow-config.yml"
+Write-Host "CONFIG_PATH: $CONFIG_PATH"
+```
+
+## Step 0 — Load and Validate Config
+
+Run this FIRST, before any sub-agent is invoked.
+
+```powershell
+# Auto-detect config path
+$REPO_ROOT = (& "C:\Program Files\Git\bin\bash.exe" -c "git rev-parse --show-toplevel" 2>$null).Trim() -replace '/','\\'
+if (-not $REPO_ROOT) { $REPO_ROOT = (Get-Location).Path }
+$CONFIG_PATH = "$REPO_ROOT\.github\config\ghas-workflow-config.yml"
+
+# Validate config
+$result = python "$REPO_ROOT\.github\scripts\validate_config.py" $CONFIG_PATH
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Aborting: config validation failed."
+    exit 1
+}
+Write-Host $result
+
+# Load all config values as PowerShell variables
+$cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
+$cfg = $cfgJson | ConvertFrom-Json
+
+$REPO_OWNER      = $cfg.environment.repo_owner
+$REPO_NAME       = $cfg.environment.repo_name
+$SERVICE_NAME    = $cfg.environment.service_name
+$REPO_ROOT       = $cfg.environment.repo_root
+$GIT_BASH        = $cfg.tools.git_bash
+$GH_CMD          = $cfg.tools.gh
+$PYTHON_CMD      = $cfg.tools.python
+$JIRA_PROJECT    = $cfg.jira.project_key
+$FETCH_SCRIPT    = Join-Path $REPO_ROOT ($cfg.scripts.fetch_alerts -replace '/','\')
+$JIRA_SCRIPT     = Join-Path $REPO_ROOT ($cfg.scripts.jira_ticket_manager -replace '/','\')
+$CSV_GLOB        = Join-Path $REPO_ROOT ($cfg.csv.glob_pattern)
+$BASE_LABEL      = ($cfg.jira.labels | Select-Object -First 1)
+
+Write-Host "Loaded: repo=$REPO_OWNER/$REPO_NAME  service=$SERVICE_NAME  jira=$JIRA_PROJECT"
+```
+
+If this step fails → **stop immediately**. Do not proceed to sub-agents.
 
 ---
 
@@ -45,26 +95,32 @@ Use the `task` tool:
 You are the w1-fetcher sub-agent for GHAS Workflow 1.
 Use the powershell tool for ALL commands. Never simulate — run every command and show real output.
 
-## Fixed paths
-- Git Bash: C:\Program Files\Git\bin\bash.exe
-- fetch_alerts.sh: C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\scripts\fetch_alerts.sh
-- Repo root: C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS
+CONFIG_PATH = $CONFIG_PATH
+REPO_ROOT = $REPO_ROOT
+GIT_BASH = $GIT_BASH
+GH_CMD = $GH_CMD
+PYTHON_CMD = $PYTHON_CMD
+FETCH_SCRIPT = $FETCH_SCRIPT
+CSV_GLOB = $CSV_GLOB
+SERVICE_NAME = $SERVICE_NAME
+REPO_OWNER = $REPO_OWNER
+REPO_NAME = $REPO_NAME
 
 ## Steps
 
 ### 1. Verify gh auth
 Run via powershell:
-  & "C:\Program Files\Git\bin\bash.exe" -c "/c/Program\ Files/GitHub\ CLI/gh auth status"
+  & $GIT_BASH -c "$GH_CMD auth status"
 If not authenticated → STOP with error "gh auth login required".
 
 ### 2. Run fetch_alerts.sh
-  & "C:\Program Files\Git\bin\bash.exe" "C:/Users/TanishqShrivas/DummyProj/GHAS-dummy-projects/HMS/.github/scripts/fetch_alerts.sh"
+  & $GIT_BASH -c "$($FETCH_SCRIPT -replace '\\','/') $REPO_ROOT $SERVICE_NAME $REPO_OWNER $REPO_NAME"
 
 ### 3. Resolve CSV path
-  Get-ChildItem "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\github_alerts_*.csv" | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+  Get-ChildItem $CSV_GLOB | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 
 ### 4. Count rows
-  $csv = Get-ChildItem "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\github_alerts_*.csv" | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+  $csv = Get-ChildItem $CSV_GLOB | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
   (Get-Content $csv | Select-Object -Skip 1 | Where-Object { $_ -ne "" }).Count
 
 If count = 0 → STOP with error "No open alerts found".
@@ -97,13 +153,18 @@ Use the `task` tool:
 You are the w1-sorter sub-agent for GHAS Workflow 1.
 Use the powershell tool for ALL commands. Never simulate — run every command and show real output.
 
+CONFIG_PATH = $CONFIG_PATH
 CSV_PATH = <CSV_PATH>
+REPO_ROOT = $REPO_ROOT
+CSV_GLOB = $CSV_GLOB
+SERVICE_NAME = $SERVICE_NAME
 
 ## Step: Group alerts by service
 Run via powershell:
   python -c "
   import csv, glob, os
-  files = sorted(glob.glob(r'C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\github_alerts_*.csv'), key=os.path.getmtime, reverse=True)
+  SERVICE = '$SERVICE_NAME'
+  files = sorted(glob.glob(r'$CSV_GLOB'), key=os.path.getmtime, reverse=True)
   CSV_PATH = files[0]
   with open(CSV_PATH, newline='', encoding='utf-8') as f:
       rows = list(csv.DictReader(f))
@@ -112,6 +173,7 @@ Run via powershell:
       svc = row['service']
       if svc not in groups: groups[svc] = []
       groups[svc].append(row)
+  print(f'CONFIG_SERVICE: {SERVICE}')
   for svc, alerts in groups.items():
       counts = {}
       for a in alerts:
@@ -152,20 +214,25 @@ Use the `task` tool:
 You are the w1-jira-manager sub-agent for GHAS Workflow 1.
 Use the powershell tool for ALL commands. Never simulate — run every command and show real output.
 
+CONFIG_PATH = $CONFIG_PATH
 CSV_PATH = <CSV_PATH>
 SERVICE_NAMES = <SERVICE_NAMES>  (comma-separated)
-jira_ticket_manager.py = C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\scripts\jira_ticket_manager.py
+JIRA_SCRIPT = $JIRA_SCRIPT
+JIRA_PROJECT = $JIRA_PROJECT
+BASE_LABEL = $BASE_LABEL
+CSV_GLOB = $CSV_GLOB
+SERVICE_NAME = $SERVICE_NAME
 
 ## For each service in SERVICE_NAMES, run in order:
 
 ### A. Check for existing ticket
-  python "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\scripts\jira_ticket_manager.py" search --project HMS --labels "GHAS,<SERVICE>"
+  & $PYTHON_CMD $JIRA_SCRIPT search --project $JIRA_PROJECT --labels "$BASE_LABEL,<SERVICE>"
 
 - Non-empty array → JIRA_KEY = result[0].key, JIRA_STATUS = SKIPPED → skip to C
 - Empty array [] → proceed to B
 
 ### B. Create ticket (only if A returned [])
-  python "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\scripts\jira_ticket_manager.py" create --project HMS --service "<SERVICE>" --csv "<CSV_PATH>"
+  & $PYTHON_CMD $JIRA_SCRIPT create --project $JIRA_PROJECT --service "<SERVICE>" --csv "<CSV_PATH>"
 
 Parse JIRA_KEY from JSON output. Set JIRA_STATUS = CREATED.
 If command fails → log exact error, continue to next service.
@@ -173,7 +240,8 @@ If command fails → log exact error, continue to next service.
 ### C. Update CSV
   python -c "
   import csv, glob, os
-  files = sorted(glob.glob(r'C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\github_alerts_*.csv'), key=os.path.getmtime, reverse=True)
+  SERVICE = '$SERVICE_NAME'
+  files = sorted(glob.glob(r'$CSV_GLOB'), key=os.path.getmtime, reverse=True)
   CSV_PATH = files[0]
   SERVICE = '<SERVICE>'
   JIRA_KEY = '<JIRA_KEY>'
@@ -219,7 +287,7 @@ Print the summary box using values captured from sub-agent outputs:
 ║  CSV file             : <CSV_PATH>                   ║
 ║  Services scanned     : <N>                          ║
 ║  Total alerts         : <N> (<SEVERITY_BREAKDOWN>)   ║
-║  Jira tickets created : <N>  → [HMS-XX, ...]         ║
+║  Jira tickets created : <N>  → [HMS-XX, ...]         ║  # example — actual value from config
 ║  Jira tickets skipped : <N>  (duplicates)            ║
 ╚══════════════════════════════════════════════════════╝
 ```
@@ -228,5 +296,5 @@ Print the summary box using values captured from sub-agent outputs:
 
 - Spawn sub-agents with `agent_type: "general-purpose"` — never use custom agent types for sub-agents
 - Never proceed to the next sub-agent if the current one reports a failure
-- Always pass `CSV_PATH` and `SERVICE_NAMES` explicitly in the prompt to downstream sub-agents
-- Never ask the user for any config value — all values are fixed above
+- Always pass `CONFIG_PATH`, `CSV_PATH`, and `SERVICE_NAMES` explicitly in the prompt to downstream sub-agents
+- Never ask the user for any config value — all values are loaded from the shared YAML config

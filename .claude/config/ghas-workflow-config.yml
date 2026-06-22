@@ -1,29 +1,76 @@
+# ==============================================================
 # GHAS Workflow Configuration
-# Edit this file to customize Jira ticket structure and workflow behaviour.
-# Read by jira_ticket_manager.py, w1-jira-manager, and w2 agents.
+# ==============================================================
+# This file drives ALL configurable behaviour of
+#   Workflow 1 — Alert Ingestion  (W1)
+#   Workflow 2 — Vulnerability Resolver  (W2)
+#
+# HOW TO USE
+#   1. Fill in every [REQUIRED] field for your environment.
+#   2. Adjust optional fields to match your Jira board,
+#      build toolchain, and infrastructure.
+#   3. Run either workflow — the orchestrators validate this
+#      file at startup and fail fast on missing/invalid values.
+#
+# PORTABILITY
+#   This file is the ONLY place you need to change to run
+#   these workflows in a different project or environment.
+# ==============================================================
 
+
+# --------------------------------------------------------------
+# ENVIRONMENT — identifies your project and local machine
+# --------------------------------------------------------------
+environment:
+  repo_owner: tanishq-sh17          # [REQUIRED] GitHub owner (org or user)
+  repo_name: HMS                    # [REQUIRED] GitHub repository name
+  service_name: HMS                 # [REQUIRED] Display name used in Jira tickets and reports
+  repo_root: C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS  # [REQUIRED] Absolute path to repo root on this machine
+  base_branch: main                 # Branch that feature branches are created from
+
+
+# --------------------------------------------------------------
+# TOOLS — CLI tool locations
+# Override if a tool is not on PATH or lives in a non-standard place.
+# Use just the binary name (e.g. "gh") if it is on PATH.
+# --------------------------------------------------------------
+tools:
+  git_bash: "C:\\Program Files\\Git\\bin\\bash.exe"  # Windows: full path to bash.exe from Git for Windows
+  gh: gh                            # GitHub CLI binary
+  jq: jq                            # jq binary
+  python: python                    # Python 3 binary
+  maven: mvn                        # Maven binary (used by Workflow 2)
+  gradle: ./gradlew                 # Gradle wrapper path, relative to repo_root
+
+
+# --------------------------------------------------------------
+# JIRA — project and ticket settings
+# --------------------------------------------------------------
 jira:
-  project_key: HMS
-  site_url: https://tanishqshrivas.atlassian.net
+  site_url: https://tanishqshrivas.atlassian.net  # [REQUIRED] Your Atlassian site URL (no trailing slash)
+  project_key: HMS                  # [REQUIRED] Jira project key
 
+  # Labels added to every new ticket.
+  # The service_name is ALWAYS appended automatically as an extra label.
   labels: [GHAS]
-  # service name is always appended automatically as an additional label
 
-  assignee: null        # null = unassigned; set to Jira accountId to auto-assign
-  parent_jira: null     # parent epic key e.g. HMS-5
-  story_points: null
-  team: null
+  assignee: null                    # Jira accountId string, or null for unassigned
+  parent_jira: null                 # Parent epic key (e.g. HMS-5), or null
+  story_points: 3                   # Story points for new tickets
+  team: null                        # Team name, or null to leave blank
+  priority: High                    # Ticket priority — set by business, not mapped per severity
 
-  # Priority is set by business — all GHAS tickets default to High
-  priority: High
+  # Template for the ticket summary (title) line.
+  # Placeholders: {service_name}  {severity_summary}  (e.g. "Critical-2, High-5, Medium-3, Low-1")
+  ticket_summary_template: "Address GHAS vulnerabilities for {service_name} [{severity_summary}]"
 
-  # Jira ticket description — which columns to show in the Dependabot alert table
-  # Available: ghsa_id, cve_id, title, severity, created, due, ageDays, nonCompliant, url
-  template:
-    include_columns: [ghsa_id, cve_id, title]
+  # Columns shown in the Dependabot alert table inside the ticket description.
+  # Available columns: ghsa_id, cve_id, title, severity, created, due, ageDays, nonCompliant, url
+  ticket_table_columns: [ghsa_id, cve_id, title]
 
-  # Duplicate check — skip creating a new ticket if existing one is in any of these statuses
-  # Teams can add or remove statuses to match their Jira board configuration
+  # Status-aware duplicate detection.
+  # A NEW ticket is created only when the existing ticket's status is NOT in this list.
+  # Customise to match your Jira board's workflow statuses.
   skip_statuses_for_duplicate_check:
     - To Do
     - Funnel
@@ -32,13 +79,138 @@ jira:
     - Blocked
     - On Hold
 
-workflow:
-  build_tool: maven     # maven | gradle  (used by Workflow 2)
-  maven_path: mvn       # override if mvn is not on PATH (e.g. C:\apache-maven\bin\mvn)
-  gradle_path: ./gradlew  # relative path to gradlew for Gradle projects
-  test_command: null    # null = use default (mvn test / gradle test); set to override
-  smoke_check_url: http://localhost:8080/api/v1/actuator/health
-  smoke_check_timeout_seconds: 60
-  auto_approve_minor: false   # skip human approval gate for MINOR version upgrades
-  auto_approve_critical: false  # auto-approve CRITICAL fixes without prompting
+  # Status categories used to search for open tickets when no Jira ID is provided.
+  open_status_categories: ["To Do", "In Progress"]
 
+  # Transition names used by the reporter at the end of Workflow 2.
+  transition_done: Done
+  transition_in_review: In Review
+
+
+# --------------------------------------------------------------
+# SCRIPTS — utility script paths (relative to repo_root)
+# --------------------------------------------------------------
+scripts:
+  fetch_alerts: .github/scripts/fetch_alerts.sh
+  jira_ticket_manager: .github/scripts/jira_ticket_manager.py
+  config_validator: .github/scripts/validate_config.py
+
+
+# --------------------------------------------------------------
+# CSV — alert export file settings
+# --------------------------------------------------------------
+csv:
+  output_dir: "."                   # Directory for CSV output, relative to repo_root ("." = repo root)
+  filename_pattern: "github_alerts_{timestamp}.csv"  # {timestamp} = YYYYMMDD_HHMMSS
+  glob_pattern: "github_alerts_*.csv"
+  # Column header written to new CSV files (must match fetch_alerts.sh output)
+  header: "service,type,ghsa_id,cve_id,title,severity,created,due,url,Application,nonCompliant,ageDays"
+
+
+# --------------------------------------------------------------
+# SERVICES — GitHub repositories to scan in Workflow 1
+# Add one entry per service/repository.
+# The GitHub owner is taken from environment.repo_owner.
+# --------------------------------------------------------------
+services:
+  - name: HMS                       # Service display name (used in Jira labels and CSV)
+    github_repo: HMS                # GitHub repository name (may differ from service name)
+
+
+# --------------------------------------------------------------
+# WORKFLOW 2 — Vulnerability Resolver settings
+# --------------------------------------------------------------
+workflow2:
+  # Build toolchain
+  build_tool: maven                 # Build tool: maven | gradle
+  maven_path: mvn                   # Maven binary; override if mvn is not on PATH
+  gradle_path: ./gradlew            # Gradle wrapper path, relative to repo_root
+  test_command: null                # Custom test command; null = default (mvn test / gradle test)
+
+  # Project manifest file (relative to repo_root)
+  manifest_path: pom.xml            # pom.xml for Maven projects; build.gradle for Gradle
+
+  # Java source root for impact analysis (relative to repo_root)
+  source_root: src/main/java
+
+  # Smoke check — application health verification after fixes
+  smoke_check_url: http://localhost:8080/api/v1/actuator/health
+  smoke_check_timeout_seconds: 60       # Seconds to wait for app startup before health probe
+  smoke_check_request_timeout_seconds: 15  # HTTP request timeout for the health probe itself
+
+  # Human-approval gate overrides
+  auto_approve_minor: false         # true = MINOR version upgrades skip the approval prompt
+  auto_approve_critical: false      # true = CRITICAL fixes skip the approval prompt
+
+  # GitHub API pagination
+  dependabot_api_page_size: 100
+
+
+# --------------------------------------------------------------
+# RUNTIME — infrastructure the application depends on
+# --------------------------------------------------------------
+runtime:
+  mysql_host: localhost
+  mysql_port: 3306
+  app_host: localhost
+  app_port: 8080
+
+
+# --------------------------------------------------------------
+# BRANCH — feature branch settings for Workflow 2
+# Placeholders for naming templates:
+#   {jira_id}        — e.g. HMS-16
+#   {primary_package} — artifact ID of most critical approved fix (lowercased, dots→hyphens)
+#   {extra_count}    — number of additional approved fixes beyond the primary one
+# --------------------------------------------------------------
+branch:
+  base_branch: main
+  naming_single: "{jira_id}-GHAS-{primary_package}"
+  naming_multi:  "{jira_id}-GHAS-{primary_package}-and-{extra_count}-more"
+
+
+# --------------------------------------------------------------
+# DEPENDENCY GROUPS — sibling version consistency rules
+# All artifacts in a group must share the same version.
+# Extend or trim this list to match your project's dependencies.
+# Each group requires: name, group_id (Maven groupId), artifact_ids (list of artifactIds)
+# --------------------------------------------------------------
+dependency_groups:
+  - name: jjwt
+    group_id: io.jsonwebtoken
+    artifact_ids:
+      - jjwt-api
+      - jjwt-impl
+      - jjwt-jackson
+
+  - name: log4j
+    group_id: org.apache.logging.log4j
+    artifact_ids:
+      - log4j-core
+      - log4j-api
+
+  - name: jackson
+    group_id: com.fasterxml.jackson.core
+    artifact_ids:
+      - jackson-databind
+      - jackson-core
+      - jackson-annotations
+
+
+# --------------------------------------------------------------
+# VALIDATION — fields checked at startup before any agent runs
+# Orchestrators call validate_config.py before delegating to sub-agents.
+# --------------------------------------------------------------
+validation:
+  # Dot-notation paths to fields that MUST be non-null/non-empty.
+  required_fields:
+    - environment.repo_owner
+    - environment.repo_name
+    - environment.service_name
+    - environment.repo_root
+    - jira.site_url
+    - jira.project_key
+
+  # These filesystem paths must exist on disk.
+  required_paths:
+    - environment.repo_root

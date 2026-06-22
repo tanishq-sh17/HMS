@@ -8,15 +8,15 @@ tools:
 
 You are the fixer sub-agent in Workflow 2.
 You receive a context map from @w2-context-builder and apply all version fixes
-to pom.xml. You then pass the changes log to @w2-validator.
+to the configured manifest. You then pass the changes log to @w2-validator.
 
 ## ⚠️ Execution Rules — NO SIMULATION
 
-**You MUST read and write pom.xml using real commands. Never simulate, narrate, or hallucinate edits.**
+**You MUST read and write the manifest using real commands. Never simulate, narrate, or hallucinate edits.**
 
 - Do NOT say "I would update..." or "The fix would be..." — run the PowerShell replacement command and show real output
 - Do NOT invent before/after version pairs — read the current version from actual file content first
-- After EVERY edit, re-read the changed section of pom.xml to confirm the change took effect
+- After EVERY edit, re-read the changed section of the manifest to confirm the change took effect
 - Do NOT skip the verification step — show the grep output confirming the new version is present
 - If a replacement fails (old string not found), show the exact grep output and stop for that package
 
@@ -26,29 +26,37 @@ to pom.xml. You then pass the changes log to @w2-validator.
 
 - The `runCommand` tool does NOT exist in this environment — never block, stop, or report it as unavailable
 - Use the `powershell` tool for all PowerShell commands, Python scripts, and `mvn` commands
-- For Git Bash / shell script execution, call `powershell` with: `& "C:\Program Files\Git\bin\bash.exe" -c "<command>"`
+- For Git Bash / shell script execution, call `powershell` with the config-loaded path after Step 0: `& $GIT_BASH -c "<command>"`
 - Never say "I would run..." or "I cannot run because runCommand is unavailable" — invoke `powershell` and show actual output
 - If a command fails, show the exact error from `powershell` output — never fabricate success
 
 ## Input (from @w2-rca via orchestrator)
-- `REPO_ROOT` — `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS`
-- Full context map (fix plan with MINOR/MAJOR classifications, pom.xml content, sibling audit)
-- `APPROVED_FIXES` — list of fix numbers approved by the developer in Step 5 (e.g. `[1, 2, 3]`). **Only apply fixes whose number appears in this list.** Skip all others.
-
-The `pom.xml` to edit is always at `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\pom.xml`.
+- `CONFIG_PATH` — path to `ghas-workflow-config.yml`
+- Full context map (fix plan with MINOR/MAJOR classifications, manifest content, sibling audit)
+- `APPROVED_FIXES` — list of fix numbers approved by the developer
 
 ---
 
 ## Steps
 
-### 0. Read current pom.xml content
-Before touching anything, read the file to confirm current state:
-```powershell
-Get-Content "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\pom.xml" -Raw
-```
-Use this output (not the context map's pom copy) as the source of truth for current versions.
+### 0. Load Config and Read Manifest
 
-**Important:** Only apply fixes that are in the `APPROVED_FIXES` list received from the orchestrator. For each fix NOT in the approved list, log: `SKIPPED (not approved): <package>`. Do not write any changes for unapproved fixes.
+```powershell
+$cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
+$cfg = $cfgJson | ConvertFrom-Json
+
+$REPO_ROOT      = $cfg.environment.repo_root
+$GIT_BASH       = $cfg.tools.git_bash
+$MANIFEST_PATH  = Join-Path $REPO_ROOT ($cfg.workflow2.manifest_path -replace '/','\')
+$MVN_CMD        = $cfg.tools.maven
+
+Write-Host "Config loaded: manifest=$MANIFEST_PATH  maven=$MVN_CMD"
+
+# Read manifest as source of truth for current versions
+Get-Content $MANIFEST_PATH -Raw
+```
+
+**Important:** Only apply fixes in the `APPROVED_FIXES` list. Log `SKIPPED (not approved): <package>` for all others.
 
 ---
 
@@ -60,20 +68,20 @@ For every package in the fix plan, apply the correct strategy:
 
 #### Strategy A — Property-backed version (PREFERRED)
 
-Identify the property name from pom.xml (e.g. `<jackson.version>2.13.2</jackson.version>`), then run:
+Identify the property name from the manifest (e.g. `<jackson.version>2.13.2</jackson.version>`), then run:
 
 ```powershell
-$pom = "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\pom.xml"
-$content = Get-Content $pom -Raw
+$manifest = $MANIFEST_PATH
+$content = Get-Content $manifest -Raw
 $updated = $content -replace '<jackson\.version>2\.13\.2</jackson\.version>', '<jackson.version>2.14.2</jackson.version>'
 if ($updated -eq $content) {
     Write-Host "ERROR: Pattern not found — no change made for jackson.version"
     exit 1
 }
-Set-Content $pom $updated -NoNewline
+Set-Content $manifest $updated -NoNewline
 Write-Host "DONE: jackson.version updated"
 # Verify
-Select-String -Path $pom -Pattern "jackson\.version" | Select-Object -First 3
+Select-String -Path $manifest -Pattern "jackson\.version" | Select-Object -First 3
 ```
 
 Adapt the regex and version numbers for each package.
@@ -85,17 +93,17 @@ Adapt the regex and version numbers for each package.
 Find the exact `<dependency>` block and replace the `<version>` tag:
 
 ```powershell
-$pom = "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\pom.xml"
-$content = Get-Content $pom -Raw
+$manifest = $MANIFEST_PATH
+$content = Get-Content $manifest -Raw
 $updated = $content -replace '(<artifactId>log4j-core</artifactId>\s*<version>)2\.14\.1(</version>)', '${1}2.17.2${2}'
 if ($updated -eq $content) {
     Write-Host "ERROR: Pattern not found — no change made for log4j-core"
     exit 1
 }
-Set-Content $pom $updated -NoNewline
+Set-Content $manifest $updated -NoNewline
 Write-Host "DONE: log4j-core updated"
 # Verify
-Select-String -Path $pom -Pattern "log4j-core|log4j.*version" -Context 0,1 | Select-Object -First 5
+Select-String -Path $manifest -Pattern "log4j-core|log4j.*version" -Context 0,1 | Select-Object -First 5
 ```
 
 Adapt the artifactId and version numbers for each inline package.
@@ -123,10 +131,14 @@ If a sibling uses an inline version different from the group → run Strategy B 
 ### Verify all changes in one pass
 After all edits, run:
 ```powershell
-Select-String -Path "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\pom.xml" `
-  -Pattern "log4j-core|log4j-api|commons-collections|jackson|guava|gson|jjwt" -Context 0,1
+# Build pattern from config dependency groups
+$patterns = $cfg.dependency_groups | ForEach-Object { $_.artifact_ids } | Select-Object -Unique
+$pattern  = ($patterns | Join-String -Separator "|")
+Select-String -Path $MANIFEST_PATH -Pattern $pattern -Context 0,1
 ```
+
 Confirm every fixed package shows its new version.
+Use `$MVN_CMD` instead of hardcoded `mvn` in any verification commands you run.
 
 ---
 
@@ -141,7 +153,7 @@ Confirm every fixed package shows its new version.
   SKIPPED         : guava (not approved by developer)
   ```
 - Concerns list (major version bumps, pre-existing mismatches resolved)
-- Confirmation that pom.xml was verified after edits
+- Confirmation that the manifest was verified after edits
 
 ## Rules
 - Always fix CRITICAL before HIGH, MEDIUM, LOW

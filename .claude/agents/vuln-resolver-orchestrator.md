@@ -23,7 +23,7 @@ You coordinate the four sub-agents that fix Dependabot vulnerabilities, validate
 
 - The `runCommand` tool does NOT exist in this environment — never block, stop, or report it as unavailable
 - Use the `powershell` tool for all PowerShell commands, Python scripts, and `mvn` commands
-- For Git Bash / shell script execution, call `powershell` with: `& "C:\Program Files\Git\bin\bash.exe" -c "<command>"`
+- For Git Bash / shell script execution, call `powershell` with the config-loaded path after Step 0: `& $GIT_BASH -c "<command>"`
 - Never say "I would run..." or "I cannot run because runCommand is unavailable" — invoke `powershell` and show actual output
 - If a command fails, show the exact error from `powershell` output — never fabricate success
 
@@ -48,22 +48,53 @@ At every phase transition, emit a clear status line:
 ✅ Step 7/8 — Report posted to Jira HMS-XX, ticket transitioned to Done
 ```
 
-## Fixed Configuration (never ask the user for these)
+## Configuration
 
-| Setting | Value |
-|---|---|
-| Repo | `tanishq-sh17/HMS` |
-| Service name | `HMS` |
-| Jira Site URL | `https://tanishqshrivas.atlassian.net` |
-| Jira Project Key | `HMS` |
-| Repo root | `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS` |
-| Config path | `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\config\ghas-workflow-config.yml` |
+All settings are loaded from the shared YAML config file.
+
+**Config file** (auto-detected from git repo root):
+```
+<repo_root>\.github\config\ghas-workflow-config.yml
+```
+Run `Step 0` below before any other step.
 
 ## Required Input (only this needs to be provided)
 
 - **Jira ticket ID** — the ticket created by Workflow 1 (e.g. `HMS-16`)
 
-If not provided, look it up using the `jira` tool: search Jira for `project = "HMS" AND labels = "GHAS" AND labels = "HMS" AND statusCategory in ("To Do", "In Progress")` and use the most recent result. If the lookup returns zero results, stop and tell the user no open GHAS ticket was found for HMS.
+If not provided, look it up using the `jira` tool: search Jira for `project = "$JIRA_PROJECT" AND labels = "$BASE_LABEL" AND labels = "$SERVICE_NAME" AND statusCategory in ("$OPEN_STATUSES")` and use the most recent result. If the lookup returns zero results, stop and tell the user no open GHAS ticket was found for the configured service.
+
+## Step 0 — Load and Validate Config
+
+Run this before any sub-agent is invoked.
+
+```powershell
+Set-Location (& "C:\Program Files\Git\bin\bash.exe" -c "git rev-parse --show-toplevel" 2>$null).Trim().Replace('/','\')
+$REPO_ROOT   = (Get-Location).Path
+$CONFIG_PATH = "$REPO_ROOT\.github\config\ghas-workflow-config.yml"
+
+# Validate
+python "$REPO_ROOT\.github\scripts\validate_config.py" $CONFIG_PATH
+if ($LASTEXITCODE -ne 0) { Write-Host "Aborting."; exit 1 }
+
+# Load
+$cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
+$cfg = $cfgJson | ConvertFrom-Json
+
+$REPO_OWNER    = $cfg.environment.repo_owner
+$REPO_NAME     = $cfg.environment.repo_name
+$SERVICE_NAME  = $cfg.environment.service_name
+$REPO_ROOT     = $cfg.environment.repo_root
+$JIRA_PROJECT  = $cfg.jira.project_key
+$BASE_LABEL    = ($cfg.jira.labels | Select-Object -First 1)
+$OPEN_STATUSES = $cfg.jira.open_status_categories -join '", "'
+$GIT_BASH      = $cfg.tools.git_bash
+$BRANCH_BASE   = $cfg.branch.base_branch
+
+Write-Host "Config OK: repo=$REPO_OWNER/$REPO_NAME  service=$SERVICE_NAME  jira=$JIRA_PROJECT"
+```
+
+If this step fails → stop immediately.
 
 ## Steps
 
@@ -71,9 +102,9 @@ Run sub-agents in this exact order. Wait for each to complete before starting th
 If any sub-agent fails → **stop immediately**, report which one failed and why. Do not proceed.
 
 ### Step 1 — @w2-context-builder
-Pass: repo (`tanishq-sh17/HMS`), repo root, Jira ticket ID, config path.
+Pass: repo (`$REPO_OWNER/$REPO_NAME`), repo root, Jira ticket ID, config path (`$CONFIG_PATH`).
 
-Fetch open Dependabot alerts + `pom.xml`; read workflow config; classify each dependency version type (inline / property-backed / BOM-managed) and upgrade type (MINOR / MAJOR); audit sibling group consistency (`jjwt-*`, `log4j-*`, `jackson-*`).
+Fetch open Dependabot alerts + manifest; read workflow config; classify each dependency version type (inline / property-backed / BOM-managed) and upgrade type (MINOR / MAJOR); audit sibling group consistency from config.
 
 Capture from its output:
 - `CONTEXT_MAP` — dependency classifications, alert details, MINOR/MAJOR labels, build config flags
@@ -81,9 +112,9 @@ Capture from its output:
 ---
 
 ### Step 2 — @w2-rca
-Pass: `CONTEXT_MAP` from Step 1, repo root.
+Pass: `CONTEXT_MAP` from Step 1, `CONFIG_PATH`, repo root.
 
-For each vulnerability in the fix plan: explain root cause, exploitability, and which application code is affected. Produce a proposed pom.xml diff (no file writes).
+For each vulnerability in the fix plan: explain root cause, exploitability, and which application code is affected. Produce a proposed manifest diff (no file writes).
 
 Capture from its output:
 - `RCA_SUMMARY` — per-fix RCA blocks + proposed diff
@@ -149,21 +180,29 @@ If the developer approves zero fixes → stop here. Do NOT invoke @w2-fixer.
 
 Before any file is modified, create a dedicated git branch for this fix set.
 
+**Branch naming** — read from config:
+- `branch.naming_single` template for 1 fix: `{jira_id}-GHAS-{primary_package}`
+- `branch.naming_multi` template for 2+ fixes: `{jira_id}-GHAS-{primary_package}-and-{extra_count}-more`
+
+```powershell
+$branchNamingSingle = $cfg.branch.naming_single
+$branchNamingMulti  = $cfg.branch.naming_multi
+# Apply templates by replacing {jira_id}, {primary_package}, {extra_count}
+```
+
 **Branch naming rule:**
-- Format: `<JIRA_TICKET_ID>-GHAS-<primary-package>[-and-N-more]`
 - `<primary-package>` = artifact ID of the most critical (first in fix plan) approved fix, lowercased, with dots replaced by hyphens
-- If only 1 approved fix: `HMS-16-GHAS-log4j-core`
-- If 2+ approved fixes: `HMS-16-GHAS-log4j-core-and-3-more` (where N = remaining count)
 - Strip any characters that are not alphanumeric, hyphens, or dots from the package name
 
 ```powershell
-Set-Location "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS"
+Set-Location $REPO_ROOT
 
-# Confirm we are on the expected base (main/master)
+# Confirm we are on the expected base branch from config
 git branch --show-current
 
 # Create and switch to the feature branch
-$branchName = "<computed-branch-name>"   # substitute with the computed name above
+$branchName = "<computed-branch-name>"
+git checkout $BRANCH_BASE
 git checkout -b $branchName
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: Failed to create branch $branchName"
@@ -177,14 +216,14 @@ git branch --show-current
 - Try appending `-2`, `-3`, etc. until the name is free
 - If git is not available or the repo is not a git repo → stop and tell the user
 
-Store `FEATURE_BRANCH` = the created branch name. Pass it to @w2-reporter.
+Store `FEATURE_BRANCH` = the created branch name. Pass it and `CONFIG_PATH` to @w2-reporter.
 
 ---
 
 ### Step 6 — @w2-fixer
-Pass: repo root, `CONTEXT_MAP` from Step 1, `APPROVED_FIXES` from Step 4.
+Pass: repo root, `CONFIG_PATH`, `CONTEXT_MAP` from Step 1, `APPROVED_FIXES` from Step 4.
 
-Apply only the approved version fixes to `pom.xml` (CRITICAL first); enforce sibling group consistency; handle inline vs property-backed correctly. Tag each fix as [MAJOR] or [MINOR] in the output.
+Apply only the approved version fixes to the configured manifest (CRITICAL first); enforce sibling group consistency; handle inline vs property-backed correctly. Tag each fix as [MAJOR] or [MINOR] in the output.
 
 Capture from its output:
 - `FIXES_APPLIED` — list of packages fixed with before/after versions and upgrade type
@@ -193,9 +232,9 @@ Capture from its output:
 ---
 
 ### Step 7 — @w2-validator
-Pass: repo root, `FIXES_APPLIED` from Step 6, config path.
+Pass: repo root, `FIXES_APPLIED` from Step 6, `CONFIG_PATH`.
 
-Run `mvn dependency:tree` → `mvn compile` → `mvn test` → `spring-boot:run` smoke check (using URL and timeout from config). Revert individual failing fixes (never the whole file). Flag reverted fixes for human review.
+Run `dependency:tree` → `compile` → `test` → application smoke check (using URL and timeout from config). Revert individual failing fixes (never the whole manifest). Flag reverted fixes for human review.
 
 Capture from its output:
 - `VALIDATION_RESULTS` — per-check pass/fail
@@ -211,12 +250,13 @@ Capture from its output:
 
 ### Step 8 — @w2-reporter
 Pass everything explicitly:
+- `CONFIG_PATH`
 - `CONTEXT_MAP` from Step 1
 - `RCA_SUMMARY` from Step 2
 - `FIXES_APPLIED`, `FIXES_SKIPPED` from Step 6
 - `VALIDATION_RESULTS`, `FIXES_REVERTED` from Step 7
 - `FEATURE_BRANCH` from Step 5
-- Service name: `HMS`, Jira ticket ID, Repo
+- Service name: `$SERVICE_NAME`, Jira ticket ID, Repo: `$REPO_OWNER/$REPO_NAME`
 
 Reporter will:
 1. Compile a full end-to-end report (Dependabot fixes with MINOR/MAJOR labels + Code Scanning + Secret Scanning summary)
@@ -229,9 +269,9 @@ Present the full report produced by **@w2-reporter**.
 
 ## Rules
 
-- Never ask the user for repo, service name, Jira site URL, or project key — they are fixed above
+- Never ask the user for repo, service name, Jira site URL, or project key — they come from config
 - Only the Jira ticket ID needs to be provided (or auto-looked up)
-- Never revert the entire `pom.xml` — only revert individual failing fixes
+- Never revert the entire manifest — only revert individual failing fixes
 - Always pass all sub-agent outputs explicitly to each subsequent sub-agent
 - Never invoke @w2-fixer before human approval is received (Step 4) — unless auto-approval rules in config bypass the gate
-- If the developer aborts at Step 4 → stop immediately, make no changes to pom.xml
+- If the developer aborts at Step 4 → stop immediately, make no changes to the manifest

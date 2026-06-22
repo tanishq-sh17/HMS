@@ -25,9 +25,13 @@ Your job is to read that CSV, group the alerts by service, and pass the structur
 
 - The `runCommand` tool does NOT exist in this environment — never block, stop, or report it as unavailable
 - Use the `powershell` tool for all PowerShell commands, Python scripts, and `mvn` commands
-- For Git Bash / shell script execution, call `powershell` with: `& "C:\Program Files\Git\bin\bash.exe" -c "<command>"`
+- For Git Bash / shell script execution, call `powershell` with the config-loaded path after Step 0: `& $GIT_BASH -c "<command>"`
 - Never say "I would run..." or "I cannot run because runCommand is unavailable" — invoke `powershell` and show actual output
 - If a command fails, show the exact error from `powershell` output — never fabricate success
+
+## Input (from orchestrator)
+- `CONFIG_PATH` — path to `ghas-workflow-config.yml`
+- `CSV_PATH` — full path from @w1-fetcher (preferred)
 
 ## Progress Reporting
 
@@ -48,21 +52,35 @@ If any step fails, emit:
 
 ## Steps
 
+### 0. Load Config
+
+```powershell
+$cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
+$cfg = $cfgJson | ConvertFrom-Json
+
+$REPO_ROOT    = $cfg.environment.repo_root
+$GIT_BASH     = $cfg.tools.git_bash
+$SERVICE_NAME = $cfg.environment.service_name
+$CSV_GLOB     = Join-Path $REPO_ROOT ($cfg.csv.glob_pattern)
+
+Write-Host "Config loaded: service=$SERVICE_NAME  csv_glob=$CSV_GLOB"
+```
+
 ### 1. Resolve the CSV file path
 Use the path passed by @w1-fetcher. If not explicitly passed, resolve the latest file:
 ```powershell
-Get-ChildItem "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\github_alerts_*.csv" | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+Get-ChildItem $CSV_GLOB | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 ```
 
 ### 2. Read and group the CSV file
-Run the following inline Python to extract and group all alert rows:
+Run the following inline Python to extract, group, and compute compliance counts:
 
 ```bash
 python -c "
 import csv, glob, os
 
-# Resolve the latest CSV
-files = sorted(glob.glob(r'C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\github_alerts_*.csv'), key=os.path.getmtime, reverse=True)
+SERVICE = '$SERVICE_NAME'
+files = sorted(glob.glob(r'$CSV_GLOB'), key=os.path.getmtime, reverse=True)
 CSV_PATH = files[0] if files else None
 if not CSV_PATH:
     print('ERROR: No github_alerts_*.csv found')
@@ -75,23 +93,38 @@ for row in rows:
     if svc not in groups:
         groups[svc] = []
     groups[svc].append({
-        'type':       row['type'],
-        'ghsa_id':    row['ghsa_id'],
-        'cve_id':     row['cve_id'],
-        'title':      row['title'],
-        'severity':   row['severity'],
-        'created':    row['created'],
-        'due':        row['due'],
-        'url':        row['url'],
-        'nonCompliant': row['nonCompliant'],
-        'ageDays':    row['ageDays'],
+        'type':         row['type'],
+        'ghsa_id':      row['ghsa_id'],
+        'cve_id':       row['cve_id'],
+        'title':        row['title'],
+        'severity':     row['severity'],
+        'created':      row['created'],
+        'due':          row['due'],
+        'url':          row['url'],
+        'nonCompliant': row.get('nonCompliant', '0'),
+        'ageDays':      row.get('ageDays', ''),
     })
+
+print(f'CONFIG_SERVICE: {SERVICE}')
+severities = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
 for svc, alerts in groups.items():
     counts = {}
     for a in alerts:
         sev = (a['severity'] or '').upper()
         counts[sev] = counts.get(sev, 0) + 1
     print(f'SERVICE: {svc} | TOTAL: {len(alerts)} | {counts}')
+
+    dep = [a for a in alerts if a['type'] == 'dependabot']
+    comp_parts = []
+    for sev in severities:
+        bucket    = [a for a in dep if (a['severity'] or '').upper() == sev]
+        total_sev = len(bucket)
+        non_comp  = sum(1 for a in bucket if str(a.get('nonCompliant','0')).strip() == '1')
+        compliant = total_sev - non_comp
+        comp_parts.append(f'{sev}: total={total_sev} compliant={compliant} nonCompliant={non_comp}')
+    print(f'COMPLIANCE: {svc} | {" | ".join(comp_parts)}')
+
+print('SERVICE_NAMES:', list(groups.keys()))
 "
 ```
 
@@ -99,7 +132,7 @@ for svc, alerts in groups.items():
 
 ```
 {
-  "HMS": [ {alert1}, {alert2}, ... ],
+  "HMS": [ {alert1}, {alert2}, ... ],  # example — actual service names come from config/CSV
 }
 ```
 
@@ -123,9 +156,10 @@ Each alert dict contains: `type`, `ghsa_id`, `cve_id`, `title`, `severity`, `cre
 
 ## Output to pass to @w1-jira-manager
 - CSV file path (same file from @w1-fetcher)
-- Grouped alerts dict (service → list of alerts)
+- Grouped alerts dict (service → list of alerts) — includes `nonCompliant` and `ageDays` fields
 - List of unique service names
 - Total alert count per service (broken down by type and severity)
+- **Compliance breakdown per service** — compliant vs non-compliant counts per severity (from COMPLIANCE: lines above)
 
 ## Rules
 - Do NOT re-sort or re-write the CSV — data is already written by the script

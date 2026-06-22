@@ -27,26 +27,40 @@ Your jobs in order:
 
 - The `runCommand` tool does NOT exist in this environment — never block, stop, or report it as unavailable
 - Use the `powershell` tool for all PowerShell commands, Python scripts, and `mvn` commands
-- For Git Bash / shell script execution, call `powershell` with: `& "C:\Program Files\Git\bin\bash.exe" -c "<command>"`
+- For Git Bash / shell script execution, call `powershell` with the config-loaded path after Step 0: `& $GIT_BASH -c "<command>"`
 - Never say "I would run..." or "I cannot run because runCommand is unavailable" — invoke `powershell` and show actual output
 - If a command fails, show the exact error from `powershell` output — never fabricate success
-
-## Fixed Configuration
-
-| Setting | Value |
-|---|---|
-| Script path | `C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\scripts\jira_ticket_manager.py` |
 
 ## Input (collect from previous sub-agents)
 
 | Source | Data |
 |--------|------|
+| `CONFIG_PATH` | Path to config — load in Step 0 |
 | @w2-context-builder | Alerts scanned, dependency classifications, sibling group audit, CSV enrichment |
 | Orchestrator Step 5 | `FEATURE_BRANCH` — the git branch where fixes were applied |
 | @w2-fixer | Fixes attempted, fix types used, skipped (BOM-managed) |
 | @w2-validator | Validation results per fix, reverted fixes + reasons, final pom.xml state |
 
 ---
+
+## Step 0 — Load Config
+
+```powershell
+$cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
+$cfg = $cfgJson | ConvertFrom-Json
+
+$SERVICE_NAME       = $cfg.environment.service_name
+$GIT_BASH           = $cfg.tools.git_bash
+$REPO_OWNER         = $cfg.environment.repo_owner
+$REPO_NAME          = $cfg.environment.repo_name
+$REPO_ROOT          = $cfg.environment.repo_root
+$JIRA_SCRIPT        = Join-Path $REPO_ROOT ($cfg.scripts.jira_ticket_manager -replace '/', '\')
+$TRANSITION_DONE    = $cfg.jira.transition_done
+$TRANSITION_REVIEW  = $cfg.jira.transition_in_review
+$REPORT_TEMP_FILE   = "$env:TEMP\$($SERVICE_NAME.ToLower())_w2_report.txt"
+
+Write-Host "Config loaded: service=$SERVICE_NAME  done_transition=$TRANSITION_DONE"
+```
 
 ## Step 1 — Compile the Report
 
@@ -56,8 +70,8 @@ Populate every field below with **real data from the sub-agents**. Do not leave 
 ╔══════════════════════════════════════════════════════════════════╗
 ║          WORKFLOW 2 — END-TO-END REPORT                         ║
 ╠══════════════════════════════════════════════════════════════════╣
-║  Service       : HMS                                             ║
-║  Repo          : tanishq-sh17/HMS                                ║
+║  Service       : $SERVICE_NAME                                   ║
+║  Repo          : $REPO_OWNER/$REPO_NAME                          ║
 ║  Jira Ticket   : <JIRA_TICKET_ID>                                ║
 ║  Feature Branch: <FEATURE_BRANCH>                                ║
 ║  Run date      : <YYYY-MM-DD>                                    ║
@@ -102,10 +116,10 @@ Skipped — BOM-managed (no version to patch):
 ────────────────────────────────────────────────────────────────────
 | Check                 | Result |
 |-----------------------|--------|
-| mvn dependency:tree   | ✅/❌  |
-| mvn compile           | ✅/❌  |
-| mvn test              | ✅/❌  |
-| spring-boot:run health| ✅/❌  |
+| dependency:tree       | ✅/❌  |
+| compile               | ✅/❌  |
+| test                  | ✅/❌  |
+| smoke check           | ✅/❌  |
 
 Fixes reverted (individual failures):
 | Package | Reason reverted |
@@ -142,19 +156,19 @@ Write the compiled report to a temp file, then call the Python script:
 
 ```powershell
 # Write the report to a temp file
-$reportFile = "$env:TEMP\hms_w2_report.txt"
+$reportFile = $REPORT_TEMP_FILE
 @"
 <paste the full report text from Step 1 here>
 "@ | Set-Content $reportFile -Encoding UTF8
 
 # Post as Jira comment
-python "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\scripts\jira_ticket_manager.py" `
+python $JIRA_SCRIPT `
   comment --ticket <JIRA_TICKET_ID> --body-file "$reportFile"
 ```
 
 **Expected output:**
 ```json
-{"comment_id": "XXXXXX", "ticket": "HMS-XX", "status": "posted"}
+{"comment_id": "XXXXXX", "ticket": "HMS-XX", "status": "posted"}  // example — actual values come from Jira
 ```
 
 If the command exits non-zero:
@@ -170,35 +184,35 @@ Determine the target transition from the validation outcome:
 
 | Outcome | Condition | Target status |
 |---------|-----------|---------------|
-| ✅ Full fix | All applied fixes passed validation (0 reverted) | `Done` |
-| ⚠️ Partial fix | At least 1 fix applied AND at least 1 reverted | `In Review` |
+| ✅ Full fix | All applied fixes passed validation (0 reverted) | `$TRANSITION_DONE` |
+| ⚠️ Partial fix | At least 1 fix applied AND at least 1 reverted | `$TRANSITION_REVIEW` |
 | ❌ No fixes | Zero fixes applied OR all reverted | comment only — leave status unchanged |
 
 **Step 3a — List available transitions:**
 ```powershell
-python "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\scripts\jira_ticket_manager.py" `
+python $JIRA_SCRIPT `
   transitions --ticket <JIRA_TICKET_ID>
 ```
 
 **Expected output:**
 ```json
-[{"id": "31", "name": "Done"}, {"id": "21", "name": "In Progress"}, ...]
+[{"id": "31", "name": "Done"}, {"id": "21", "name": "In Progress"}, ...]  // example — actual transition names come from Jira
 ```
 
 **Step 3b — Apply transition (skip if outcome is "No fixes"):**
 ```powershell
-python "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS\.github\scripts\jira_ticket_manager.py" `
-  transition --ticket <JIRA_TICKET_ID> --name "<Done|In Review>"
+python $JIRA_SCRIPT `
+  transition --ticket <JIRA_TICKET_ID> --name "<$TRANSITION_DONE|$TRANSITION_REVIEW>"
 ```
 
 **Expected output:**
 ```json
-{"ticket": "HMS-XX", "transitioned_to": "Done", "status": "success"}
+{"ticket": "HMS-XX", "transitioned_to": "Done", "status": "success"}  // example — actual value comes from config/runtime
 ```
 
 If the transition command exits non-zero:
 - Log the error
-- Include in final output: `⚠️ Jira transition failed: <error>. Manual transition required to: <Done|In Review>`
+- Include in final output: `⚠️ Jira transition failed: <error>. Manual transition required to: <$TRANSITION_DONE|$TRANSITION_REVIEW>`
 
 ---
 
