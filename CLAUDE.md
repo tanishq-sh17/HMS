@@ -40,6 +40,8 @@ mvn clean compile
 
 All non-auth endpoints require `Authorization: Bearer <token>`. Get a token via `POST /api/v1/auth/login`.
 
+> **Note:** `spring-boot-starter-actuator` is **not** declared in `pom.xml` — the `/actuator/health` URL above returns 404. The `w2-validator` smoke check falls back to the Swagger UI (HTTP 200) as a workaround.
+
 ## Architecture
 
 Spring Boot 3.2.3 / Java 17 REST API. Base package: `com.hms`. Every business domain is a self-contained sub-package with the same internal layout:
@@ -84,6 +86,10 @@ Cross-cutting: `common` (BaseEntity, ApiResponse, enums), `exception`, `security
 
 **`ddl-auto: update`** — schema is managed automatically by Hibernate. No migration tool is configured.
 
+**Jackson configuration** — `default-property-inclusion: non_null` is set globally; null fields are omitted from all JSON responses. `write-dates-as-timestamps: false` means `LocalDateTime` fields serialize as ISO-8601 strings.
+
+**Pagination** — list endpoints accept `?page=0&size=10` query params. Controllers construct `PageRequest.of(page, size, Sort.by(...))` and pass it to repository methods returning `Page<T>`. Sort field and direction are hardcoded per endpoint.
+
 **Prescription aggregate** — `Prescription.items` uses `@OneToMany(cascade = ALL, orphanRemoval = true)`. Removing an item from the in-memory list and saving the parent will physically DELETE the row — manage the collection through the parent only.
 
 **Soft delete** — `Patient` uses an `active` boolean (`deactivatePatient()` sets it to `false`, no SQL DELETE). `Doctor` uses `available` for the same pattern. Note: `UserPrincipal.isEnabled()` always returns `true`, so a deactivated `User.active = false` record can still authenticate.
@@ -107,7 +113,21 @@ Business code formats:
 
 **Transactions** — all write service methods are `@Transactional`; all read methods are `@Transactional(readOnly = true)`.
 
-**Security roles** — `ADMIN`, `DOCTOR`, `RECEPTIONIST`, `PATIENT`. Public endpoints: `/auth/**`, Swagger paths, `/actuator/**`. Use `hasRole('ADMIN')` (not `hasAuthority('ROLE_ADMIN')`) in `@PreAuthorize`.
+**Security roles** — `ADMIN`, `DOCTOR`, `RECEPTIONIST`, `PATIENT`. Use `hasRole('ADMIN')` (not `hasAuthority('ROLE_ADMIN')`) in `@PreAuthorize`. Endpoint access rules from `SecurityConfig`:
+
+| Endpoint pattern | Allowed roles |
+|---|---|
+| `/auth/**`, Swagger, `/actuator/**` | Public |
+| `GET /patients/**` | ADMIN, DOCTOR, RECEPTIONIST |
+| `* /patients/**` | ADMIN, RECEPTIONIST |
+| `GET /doctors/**` | ADMIN, DOCTOR, RECEPTIONIST, PATIENT |
+| `* /doctors/**` | ADMIN only |
+| `POST /appointments/**` | ADMIN, RECEPTIONIST, PATIENT |
+| `GET /appointments/**` | ADMIN, DOCTOR, RECEPTIONIST, PATIENT |
+| `* /appointments/**` | ADMIN, RECEPTIONIST |
+| `/medical-records/**` | ADMIN, DOCTOR, RECEPTIONIST |
+| `/prescriptions/**` | ADMIN, DOCTOR |
+| `/billing/**` | ADMIN, RECEPTIONIST |
 
 **Enums** — all enum fields on entities are persisted as `EnumType.STRING`.
 
@@ -117,13 +137,23 @@ This is a GHAS/Dependabot demo project. The following dependencies are declared 
 
 | Dependency | Version | Purpose |
 |---|---|---|
-| `log4j-core` | 2.14.1 | CVE-2021-44228 (Log4Shell) |
-| `commons-collections` | 3.2.1 | CVE-2015-7501 (deserialization RCE) |
-| `jackson-databind` | 2.13.2 | CVE-2020-36518, CVE-2022-42003/42004 |
+| `log4j-core` | 2.14.1 | CVE-2021-44228 (Log4Shell), CVE-2021-45046, CVE-2021-45105, CVE-2021-44832 |
+| `commons-collections` | 3.2.1 | CVE-2015-7501, CVE-2015-6420 (deserialization RCE) |
+| `jackson-databind` | 2.13.2 | CVE-2020-36518, CVE-2022-42003, CVE-2022-42004 |
 | `guava` | 29.0-jre | CVE-2020-8908, CVE-2023-2976 |
 | `gson` | 2.8.5 | CVE-2022-25647 |
+| `commons-text` | 1.9 | CVE-2022-42889 (Text4Shell — RCE via StringSubstitutor) |
+| `snakeyaml` | 1.30 | CVE-2022-1471 (RCE via unsafe deserialization) |
+| `h2` | 1.4.200 | CVE-2021-42392, CVE-2022-23221 (unauthenticated RCE via JNDI) |
+| `xstream` | 1.4.17 | CVE-2021-39139 and ~17 others (RCE via unsafe type processing) |
+| `netty-all` | 4.1.72.Final | CVE-2021-43797 (HTTP request smuggling) |
 
 Do not upgrade these without understanding the GHAS workflow impact.
+
+**Known caveats:**
+- `snakeyaml 1.30` overrides Spring Boot's BOM-managed safe version — `w2-validator` may need a `<dependencyManagement>` override if the fix doesn't take effect transitively.
+- `h2 1.4.200` is declared without `<scope>test</scope>`, placing it on the runtime classpath. Spring Boot may attempt to auto-configure an H2 datasource — watch for startup conflicts during `w2-validator`'s smoke check.
+- `xstream 1.4.17` alone generates ~18 Dependabot alerts due to the large number of individually tracked CVEs.
 
 ## Tests
 
@@ -135,7 +165,7 @@ All tests are service-layer unit tests using Mockito (`@ExtendWith(MockitoExtens
 
 **GitHub CLI** — run `gh auth login` once (no token file needed; `fetch_alerts.sh` uses keyring auth).
 
-**Jira API** — `jira_helper.py` (`.claude/scripts/jira_helper.py`) requires:
+**Jira API** — `jira_ticket_manager.py` (`.claude/scripts/jira_ticket_manager.py`) requires:
 1. `pip install requests python-dotenv` (one-time setup)
 2. Fill in `.env` at repo root:
    ```
@@ -143,7 +173,7 @@ All tests are service-layer unit tests using Mockito (`@ExtendWith(MockitoExtens
    JIRA_EMAIL=<your-atlassian-account-email>
    JIRA_API_TOKEN=<your-atlassian-api-token>
    ```
-3. Verify auth: `python .claude/scripts/jira_helper.py search --jql "project=HMS AND labels=GHAS"`
+3. Verify auth: `python .claude/scripts/jira_ticket_manager.py search --jql "project=HMS AND labels=GHAS"`
 
 ### Fixed Configuration (hardcoded in all agents — never ask the user)
 
@@ -167,6 +197,7 @@ A two-workflow, multi-agent system lives in `.github/agents/` (mirrored in `.cla
     w1-jira-manager.md
     vuln-resolver-orchestrator.md
     w2-context-builder.md
+    w2-rca.md                         ← RCA + impact analysis + proposed diff (human approval gate)
     w2-fixer.md
     w2-validator.md
     w2-reporter.md
@@ -174,8 +205,10 @@ A two-workflow, multi-agent system lives in `.github/agents/` (mirrored in `.cla
     fetch_alerts.sh                   ← active: gh CLI → timestamped CSV (all alert types)
     fetch_dependabot_alerts.py        ← legacy: Dependabot only, Excel output
 
-.github/agents/                       ← mirror of .claude/agents/ (kept in sync)
+.github/agents/                       ← mirror of .claude/agents/ (kept in sync manually)
 ```
+
+**Two-folder setup:** `.github/agents/` is loaded by GitHub Copilot CLI; `.claude/agents/` is the identical mirror loaded by Claude Code. Keep them in sync when modifying agent definitions.
 
 ### Workflow 1 — Alert Ingestion
 
@@ -194,9 +227,10 @@ Steps run in order; any failure stops the workflow.
 Only input needed: **Jira ticket ID** (e.g. `HMS-16`); everything else is fixed config. Steps run in order; any failure stops the workflow.
 
 1. **`w2-context-builder`** — uses GitHub MCP (`list_dependabot_alerts`, `get_file_contents`) to fetch open alerts and `pom.xml`; also reads the latest CSV for compliance/Code Scanning/Secret Scanning context; classifies each dependency as inline / property-backed / BOM-managed; audits sibling group consistency for `jjwt-*`, `log4j-*`, `jackson-*`
-2. **`w2-fixer`** — applies fixes CRITICAL first; property-backed preferred (one `<properties>` change covers all usages); updates all siblings in a group when fixing one; multiple CVEs on same package → use highest required safe version
-3. **`w2-validator`** — per-dependency `mvn dependency:tree` check first (adds `<dependencyManagement>` override if transitive pull detected); then `mvn compile` → `mvn test` → `spring-boot:run` health check at `/actuator/health`; reverts individual failing fixes only, never the whole file
-4. **`w2-reporter`** — compiles full end-to-end report (Dependabot fixes + Code Scanning + Secret Scanning summary); posts report as Jira comment; transitions ticket to Done / In Review based on outcome; **does not raise a PR**
+2. **`w2-rca`** — for each vulnerability, performs RCA + impact analysis (checks if the package is actually imported in source); proposes a `pom.xml` diff **without applying it**; presents the diff to the developer for approval before `w2-fixer` runs
+3. **`w2-fixer`** — applies fixes CRITICAL first; property-backed preferred (one `<properties>` change covers all usages); updates all siblings in a group when fixing one; multiple CVEs on same package → use highest required safe version. Fix strategy: property-backed → update `<properties>` only; inline → update `<version>` directly; BOM-managed (no `<version>` tag) → skip, noted in report
+4. **`w2-validator`** — per-dependency `mvn dependency:tree` check first (adds `<dependencyManagement>` override if transitive pull detected); then `mvn compile` → `mvn test` → `spring-boot:run` health check; reverts individual failing fixes only, never the whole file
+5. **`w2-reporter`** — compiles full end-to-end report (Dependabot fixes + Code Scanning + Secret Scanning summary); posts report as Jira comment; transitions ticket to Done / In Review based on outcome; **does not raise a PR**
 
 ### Dependabot Schedule
 

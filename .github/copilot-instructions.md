@@ -82,6 +82,10 @@ Cross-cutting concerns live in dedicated packages:
 
 **Schema management**: `ddl-auto: update` — Hibernate manages the schema automatically. No migration tool (Flyway/Liquibase) is configured.
 
+**Jackson configuration**: `default-property-inclusion: non_null` is set globally — null fields are omitted from all JSON responses. `ApiResponse<T>` also carries `@JsonInclude(NON_NULL)`. `write-dates-as-timestamps: false` means `LocalDateTime` fields serialize as ISO-8601 strings.
+
+**Pagination**: List endpoints accept `?page=0&size=10` query params. Controllers construct `PageRequest.of(page, size, Sort.by(...))` and pass it to repository methods returning `Page<T>`. The sort field and direction are hardcoded per endpoint (e.g., appointments by patient sort by `appointmentDate` descending; by doctor ascending).
+
 ---
 
 ## Key Conventions
@@ -118,7 +122,23 @@ Throw domain-specific exceptions from services; do **not** return error response
 - All read service methods are `@Transactional(readOnly = true)`.
 
 ### Security / Roles
-Roles: `ADMIN`, `DOCTOR`, `RECEPTIONIST`, `PATIENT`. Role-based URL rules are defined in `SecurityConfig`. Public endpoints: `/auth/**`, Swagger paths, `/actuator/**`. Roles are stored with the `ROLE_` prefix — use `hasRole('ADMIN')` (not `hasAuthority('ROLE_ADMIN')`) in `@PreAuthorize`.
+Roles: `ADMIN`, `DOCTOR`, `RECEPTIONIST`, `PATIENT`. Roles are stored with the `ROLE_` prefix — use `hasRole('ADMIN')` (not `hasAuthority('ROLE_ADMIN')`) in `@PreAuthorize`.
+
+Endpoint access rules defined in `SecurityConfig`:
+
+| Endpoint pattern | Allowed roles |
+|---|---|
+| `/auth/**`, Swagger, `/actuator/**` | Public |
+| `GET /patients/**` | ADMIN, DOCTOR, RECEPTIONIST |
+| `* /patients/**` | ADMIN, RECEPTIONIST |
+| `GET /doctors/**` | ADMIN, DOCTOR, RECEPTIONIST, PATIENT |
+| `* /doctors/**` | ADMIN only |
+| `POST /appointments/**` | ADMIN, RECEPTIONIST, PATIENT |
+| `GET /appointments/**` | ADMIN, DOCTOR, RECEPTIONIST, PATIENT |
+| `* /appointments/**` | ADMIN, RECEPTIONIST |
+| `/medical-records/**` | ADMIN, DOCTOR, RECEPTIONIST |
+| `/prescriptions/**` | ADMIN, DOCTOR |
+| `/billing/**` | ADMIN, RECEPTIONIST |
 
 ### Tests
 - Unit tests use `@ExtendWith(MockitoExtension.class)` with `@Mock` / `@InjectMocks` — no Spring context.
@@ -151,6 +171,7 @@ A two-workflow, multi-agent system lives in `.github/agents/` for automated Depe
     w1-jira-manager.md                ← Jira dedup check + ticket creation
     vuln-resolver-orchestrator.md     ← entry point for Workflow 2
     w2-context-builder.md             ← fetches alerts + parses pom.xml
+    w2-rca.md                         ← RCA + impact analysis + proposed diff (human approval gate)
     w2-fixer.md                       ← patches pom.xml (CRITICAL first)
     w2-validator.md                   ← dep:tree + compile + test + smoke check
     w2-reporter.md                    ← produces end-to-end report, posts Jira comment
@@ -180,15 +201,19 @@ A two-workflow, multi-agent system lives in `.github/agents/` for automated Depe
 > `fetch_dependabot_alerts.py` (also in `.github/scripts/`) is a legacy script that produces Excel output for Dependabot alerts only — do not use it for Workflow 1.
 
 ### Workflow 2 — Vulnerability Resolver
+Only input needed: **Jira ticket ID** (e.g. `HMS-16`). Steps run in order:
+
+1. **`w2-context-builder`** — fetches open alerts + `pom.xml` via GitHub MCP; reads latest CSV for compliance context; classifies each dependency as inline / property-backed / BOM-managed; audits sibling group consistency for `jjwt-*`, `log4j-*`, `jackson-*`
+2. **`w2-rca`** — for each vulnerability, performs RCA + impact analysis (checks if the package is actually imported in source); proposes a `pom.xml` diff **without applying it**; presents the diff to the developer for approval before `@w2-fixer` runs
+3. **`w2-fixer`** — applies fixes CRITICAL first; property-backed preferred; updates all siblings when fixing one; multiple CVEs on same package → use highest required safe version
+4. **`w2-validator`** — validation order: `mvn dependency:tree` → `mvn compile` → `mvn test` → `spring-boot:run` health check. Reverts individual failing fixes only.
+5. **`w2-reporter`** — compiles full report; posts as Jira comment; transitions ticket. No PR is raised.
+
 Fix strategy rules enforced by `@w2-fixer`:
 - **Property-backed versions** (`${some.version}`) → update `<properties>` block only — one change covers all usages (preferred)
 - **Inline versions** → update `<version>` tag directly
 - **BOM-managed** (no `<version>` tag) → skip, noted in report
 - Sibling groups (`jjwt-*`, `log4j-*`, `jackson-*`) must always share the same version — when fixing one, update all siblings
-
-Validation order in `@w2-validator`: `mvn dependency:tree` → `mvn compile` → `mvn test` → `spring-boot:run` health check. Individual failing fixes are reverted, not the whole file.
-
-`@w2-reporter` produces a full end-to-end report (no PR is raised) covering: alerts scanned, fixes applied, validation results, reverted fixes, and flagged concerns.
 
 ### Intentionally Vulnerable Dependencies
 
