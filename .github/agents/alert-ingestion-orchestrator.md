@@ -28,12 +28,10 @@ The config file path is the **only** value that needs to be set before running.
 <repo_root>\.github\config\ghas-workflow-config.yml
 ```
 
-Auto-detect the repo root and config path:
+Auto-detect the repo root and config path (works on any machine with git on PATH):
 ```powershell
-Set-Location "C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS"
-$REPO_ROOT = & "C:\Program Files\Git\bin\bash.exe" -c "git rev-parse --show-toplevel" 2>$null
+$REPO_ROOT = (git rev-parse --show-toplevel 2>$null).Trim() -replace '/', '\'
 if (-not $REPO_ROOT) { $REPO_ROOT = (Get-Location).Path }
-$REPO_ROOT = $REPO_ROOT.Trim() -replace '/', '\'
 $CONFIG_PATH = "$REPO_ROOT\.github\config\ghas-workflow-config.yml"
 Write-Host "CONFIG_PATH: $CONFIG_PATH"
 ```
@@ -43,8 +41,8 @@ Write-Host "CONFIG_PATH: $CONFIG_PATH"
 Run this FIRST, before any sub-agent is invoked.
 
 ```powershell
-# Auto-detect config path
-$REPO_ROOT = (& "C:\Program Files\Git\bin\bash.exe" -c "git rev-parse --show-toplevel" 2>$null).Trim() -replace '/','\\'
+# Auto-detect config path using git (works on any machine with git on PATH)
+$REPO_ROOT   = (git rev-parse --show-toplevel 2>$null).Trim() -replace '/', '\'
 if (-not $REPO_ROOT) { $REPO_ROOT = (Get-Location).Path }
 $CONFIG_PATH = "$REPO_ROOT\.github\config\ghas-workflow-config.yml"
 

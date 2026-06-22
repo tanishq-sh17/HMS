@@ -69,8 +69,9 @@ If not provided, look it up using the `jira` tool: search Jira for `project = "$
 Run this before any sub-agent is invoked.
 
 ```powershell
-Set-Location (& "C:\Program Files\Git\bin\bash.exe" -c "git rev-parse --show-toplevel" 2>$null).Trim().Replace('/','\')
-$REPO_ROOT   = (Get-Location).Path
+# Auto-detect config path using git (works on any machine with git on PATH)
+$REPO_ROOT   = (git rev-parse --show-toplevel 2>$null).Trim() -replace '/', '\'
+if (-not $REPO_ROOT) { $REPO_ROOT = (Get-Location).Path }
 $CONFIG_PATH = "$REPO_ROOT\.github\config\ghas-workflow-config.yml"
 
 # Validate
