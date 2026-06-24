@@ -169,15 +169,21 @@ A two-workflow, multi-agent system lives in `.github/agents/` for automated Depe
     w1-fetcher.md                     ← runs fetch_alerts.sh, produces CSV
     w1-sorter.md                      ← groups alerts by service
     w1-jira-manager.md                ← Jira dedup check + ticket creation
-    vuln-resolver-orchestrator.md     ← entry point for Workflow 2
+    vuln-resolver-orchestrator.md     ← entry point for Workflow 2 (11-step)
     w2-context-builder.md             ← fetches alerts + parses pom.xml
-    w2-rca.md                         ← RCA + impact analysis + proposed diff (human approval gate)
+    w2-planner.md                     ← scans source; builds CHANGE_PLAN with proposed diff (no code written)
     w2-fixer.md                       ← patches pom.xml (CRITICAL first)
     w2-validator.md                   ← dep:tree + compile + test + smoke check
-    w2-reporter.md                    ← produces end-to-end report, posts Jira comment
+    w2-github-reviewer.md             ← translates human review comments → SUGGESTED_FIXES
+    w2-verifier.md                    ← Jira cross-check + CVE manifest + regression + coverage gate
+    w2-reporter.md                    ← creates GitHub PR, posts Jira comment, transitions ticket
+  config/
+    ghas-workflow-config.yml          ← SINGLE source of truth for ALL workflow settings
   scripts/
     fetch_alerts.sh                   ← active: gh CLI → timestamped CSV (all alert types)
-    fetch_dependabot_alerts.py        ← legacy: Dependabot only → Excel output
+    jira_ticket_manager.py            ← Jira REST API helper (create/update/search tickets)
+    validate_config.py                ← validates ghas-workflow-config.yml at startup
+    fetch_dependabot_alerts.py        ← legacy: Dependabot only → Excel output (do not use for W1)
 
 .claude/
   agents/          ← mirror of .github/agents/, loaded by Claude Code (claude.ai/code)
@@ -201,19 +207,49 @@ A two-workflow, multi-agent system lives in `.github/agents/` for automated Depe
 > `fetch_dependabot_alerts.py` (also in `.github/scripts/`) is a legacy script that produces Excel output for Dependabot alerts only — do not use it for Workflow 1.
 
 ### Workflow 2 — Vulnerability Resolver
-Only input needed: **Jira ticket ID** (e.g. `HMS-16`). Steps run in order:
+Only input needed: **Jira ticket ID** (e.g. `HMS-23`). All other settings come from `ghas-workflow-config.yml`. Steps run in order (11-step flow):
 
-1. **`w2-context-builder`** — fetches open alerts + `pom.xml` via GitHub MCP; reads latest CSV for compliance context; classifies each dependency as inline / property-backed / BOM-managed; audits sibling group consistency for `jjwt-*`, `log4j-*`, `jackson-*`
-2. **`w2-rca`** — for each vulnerability, performs RCA + impact analysis (checks if the package is actually imported in source); proposes a `pom.xml` diff **without applying it**; presents the diff to the developer for approval before `@w2-fixer` runs
-3. **`w2-fixer`** — applies fixes CRITICAL first; property-backed preferred; updates all siblings when fixing one; multiple CVEs on same package → use highest required safe version
-4. **`w2-validator`** — validation order: `mvn dependency:tree` → `mvn compile` → `mvn test` → `spring-boot:run` health check. Reverts individual failing fixes only.
-5. **`w2-reporter`** — compiles full report; posts as Jira comment; transitions ticket. No PR is raised.
+0. **Config validation** — loads `ghas-workflow-config.yml`, validates required fields; aborts on failure
+1. **`w2-context-builder`** — fetches open alerts + `pom.xml` via GitHub MCP; reads latest CSV; classifies each dependency as inline / property-backed / BOM-managed; audits sibling group consistency
+2. **Feature branch creation** — creates a `git checkout -b` branch using `branch.naming_single/multi` templates from config before any file is modified
+3. **`w2-planner`** — scans source files for actual imports; generates `CHANGE_PLAN` with proposed diff and breakage risk per fix; **no code written**
+4. **User review loop** (max 3 iterations) — presents `CHANGE_PLAN` for approval, revision, or abort; exceeding max → escalate
+5. **Per-fix approval gate** — developer approves all/specific fixes; respects `auto_approve_minor` / `auto_approve_critical` flags from config
+6. **`w2-fixer` + `w2-validator` loop** (max 3 build failures) — fixer patches `pom.xml` (CRITICAL first, property-backed preferred); validator runs `mvn dependency:tree` → `mvn compile` → `mvn test` → smoke check; build failure retries with failure context
+7. **Human reviews implementation** (max 3 review cycles) — if changes requested, `w2-github-reviewer` translates comments to `SUGGESTED_FIXES` → re-runs fixer + validator
+8. **Commit changes** — `git add pom.xml && git commit` to feature branch (only after human approval in step 7)
+9. **`w2-verifier`** (max 3 verify cycles) — Jira cross-check, CVE manifest validation, regression check, test coverage; issues found → re-run fixer chain
+10. **`w2-reporter`** — pushes feature branch, creates GitHub PR, posts full report to Jira, transitions ticket (Done / In Review)
+
+**Retry escalation messages:**
+| Counter | Escalation |
+|---|---|
+| Plan revisions > 3 | `"Too many plan revision cycles — escalate to team"` |
+| Build failures > 3 | `"Too many build failures — escalate to engineer"` |
+| Review fix cycles > 3 | `"Too many review fix cycles — reassign task"` |
+| Verify fix cycles > 3 | `"Verification keeps failing — manual code review required"` |
 
 Fix strategy rules enforced by `@w2-fixer`:
 - **Property-backed versions** (`${some.version}`) → update `<properties>` block only — one change covers all usages (preferred)
 - **Inline versions** → update `<version>` tag directly
 - **BOM-managed** (no `<version>` tag) → skip, noted in report
 - Sibling groups (`jjwt-*`, `log4j-*`, `jackson-*`) must always share the same version — when fixing one, update all siblings
+
+### Workflow Config — Single Source of Truth
+
+All workflow settings live in **`.github/config/ghas-workflow-config.yml`**. Both orchestrators validate this file at startup via `validate_config.py`.
+
+Key config sections:
+| Section | Purpose |
+|---|---|
+| `environment` | Repo owner/name, `repo_root` (absolute path), base branch |
+| `jira` | Site URL, project key, labels, `ticket_table_columns`, `ticket_summary_template` |
+| `workflow2` | Build tool, manifest path, smoke check URL, `auto_approve_minor/critical` |
+| `branch` | `naming_single` / `naming_multi` templates for feature branch names |
+| `dependency_groups` | Sibling version consistency rules (`jjwt-*`, `log4j-*`, `jackson-*`) |
+| `scripts` | Relative paths to `jira_ticket_manager.py`, `fetch_alerts.sh`, `validate_config.py` |
+
+**Config-driven Jira ticket columns**: Set `jira.ticket_table_columns` to any subset of `[ghsa_id, cve_id, title, severity, created, due, ageDays, nonCompliant, url]`. Changes take effect on the next ticket creation — no script edits required.
 
 ### Intentionally Vulnerable Dependencies
 

@@ -46,6 +46,7 @@ $cfg = $cfgJson | ConvertFrom-Json
 
 $REPO_ROOT       = $cfg.environment.repo_root
 $GIT_BASH        = $cfg.tools.git_bash
+$PYTHON_CMD      = $cfg.tools.python
 $REPO_OWNER      = $cfg.environment.repo_owner
 $REPO_NAME       = $cfg.environment.repo_name
 $SERVICE_NAME    = $cfg.environment.service_name
@@ -101,7 +102,7 @@ Write-Host "CSV: $csv"
 
 Then run the Python grouping command:
 ```powershell
-python -c "
+& $PYTHON_CMD -c "
 import csv, glob, os
 
 files = sorted(glob.glob(r'$CSV_GLOB'), key=os.path.getmtime, reverse=True)

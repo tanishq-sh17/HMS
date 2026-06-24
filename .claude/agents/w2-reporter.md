@@ -1,5 +1,5 @@
 ---
-description: Workflow 2 / Sub-Agent 4 — Produces a comprehensive end-to-end report, posts the report as a Jira comment, and transitions the ticket to Done/In Review based on outcome.
+description: Workflow 2 / Sub-Agent 4 — Creates a GitHub PR for the feature branch, compiles a comprehensive end-to-end report, posts the report as a Jira comment, and transitions the ticket to Done/In Review based on outcome.
 tools:
   - powershell
 ---
@@ -8,9 +8,10 @@ tools:
 
 You are the final sub-agent in Workflow 2.
 Your jobs in order:
-1. Compile a full end-to-end report
-2. Post the report as a comment on the Jira ticket
-3. Transition the Jira ticket based on outcome
+1. Create a GitHub Pull Request for the feature branch
+2. Compile a full end-to-end report
+3. Post the report as a comment on the Jira ticket
+4. Transition the Jira ticket based on outcome
 
 ## ⚠️ Execution Rules — NO SIMULATION
 
@@ -37,9 +38,11 @@ Your jobs in order:
 |--------|------|
 | `CONFIG_PATH` | Path to config — load in Step 0 |
 | @w2-context-builder | Alerts scanned, dependency classifications, sibling group audit, CSV enrichment |
-| Orchestrator Step 5 | `FEATURE_BRANCH` — the git branch where fixes were applied |
+| Orchestrator | `FEATURE_BRANCH` — the git branch where fixes were applied |
+| Orchestrator | `JIRA_TICKET_ID` — e.g. `HMS-16` |
 | @w2-fixer | Fixes attempted, fix types used, skipped (BOM-managed) |
-| @w2-validator | Validation results per fix, reverted fixes + reasons, final pom.xml state |
+| @w2-validator | Validation results per fix, flagged concerns, VALIDATION_STATUS |
+| @w2-verifier | `VERIFICATION_RESULT` (passed / issues_found), ISSUES list, COVERAGE_SUMMARY |
 
 ---
 
@@ -51,18 +54,93 @@ $cfg = $cfgJson | ConvertFrom-Json
 
 $SERVICE_NAME       = $cfg.environment.service_name
 $GIT_BASH           = $cfg.tools.git_bash
+$PYTHON_CMD         = $cfg.tools.python
 $REPO_OWNER         = $cfg.environment.repo_owner
 $REPO_NAME          = $cfg.environment.repo_name
 $REPO_ROOT          = $cfg.environment.repo_root
+$BASE_BRANCH        = $cfg.environment.base_branch
 $JIRA_SCRIPT        = Join-Path $REPO_ROOT ($cfg.scripts.jira_ticket_manager -replace '/', '\')
 $TRANSITION_DONE    = $cfg.jira.transition_done
 $TRANSITION_REVIEW  = $cfg.jira.transition_in_review
 $REPORT_TEMP_FILE   = "$env:TEMP\$($SERVICE_NAME.ToLower())_w2_report.txt"
 
-Write-Host "Config loaded: service=$SERVICE_NAME  done_transition=$TRANSITION_DONE"
+Write-Host "Config loaded: service=$SERVICE_NAME  base_branch=$BASE_BRANCH  done_transition=$TRANSITION_DONE"
 ```
 
-## Step 1 — Compile the Report
+---
+
+## Step 1 — Create GitHub Pull Request
+
+Push the feature branch to origin and open a PR:
+
+```powershell
+Set-Location $REPO_ROOT
+
+# Push branch to origin
+& $GIT_BASH -c "git push origin $FEATURE_BRANCH"
+```
+
+Build the PR body and create the PR:
+
+```powershell
+$jiraSiteUrl = $cfg.jira.site_url
+$jiraLink    = "$jiraSiteUrl/browse/$JIRA_TICKET_ID"
+
+$prBody = @"
+## Summary
+
+Addresses GHAS vulnerabilities tracked in Jira ticket [$JIRA_TICKET_ID]($jiraLink).
+
+## Fixes applied
+
+| Package | CVE(s) | Severity | Before | After | Fix Type |
+|---------|--------|----------|--------|-------|----------|
+$(
+  # Populate from @w2-fixer changes log — one row per fix
+  # e.g.: "| log4j-core | CVE-2021-44228 | CRITICAL | 2.14.1 | 2.17.2 | inline |"
+  "<insert fixes table rows here>"
+)
+
+## Validation
+
+| Check | Result |
+|-------|--------|
+| dependency:tree | ✅/❌ |
+| compile         | ✅/❌ |
+| tests           | ✅/❌ |
+| smoke check     | ✅/❌ |
+
+## Verification
+
+$VERIFICATION_RESULT — $( if ($VERIFICATION_RESULT -eq 'passed') { 'All checks passed' } else { 'Issues found — see verifier output' } )
+
+## Related
+
+- Jira: [$JIRA_TICKET_ID]($jiraLink)
+- Feature branch: `$FEATURE_BRANCH`
+"@
+
+$prBody | Set-Content "$env:TEMP\pr_body.txt" -Encoding UTF8
+
+gh pr create `
+  --repo "$REPO_OWNER/$REPO_NAME" `
+  --base $BASE_BRANCH `
+  --head $FEATURE_BRANCH `
+  --title "fix($SERVICE_NAME): address GHAS vulnerabilities [$JIRA_TICKET_ID]" `
+  --body-file "$env:TEMP\pr_body.txt"
+```
+
+Capture the PR URL from the output (e.g. `https://github.com/owner/repo/pull/42`).
+Store it as `$PR_URL`.
+
+If `gh pr create` exits non-zero:
+- Log the error
+- Set `$PR_URL = "(PR creation failed)"`
+- Continue to Step 2 — **do not stop the workflow**
+
+---
+
+## Step 2 — Compile the Report
 
 Populate every field below with **real data from the sub-agents**. Do not leave any field as a placeholder.
 
@@ -74,6 +152,7 @@ Populate every field below with **real data from the sub-agents**. Do not leave 
 ║  Repo          : $REPO_OWNER/$REPO_NAME                          ║
 ║  Jira Ticket   : <JIRA_TICKET_ID>                                ║
 ║  Feature Branch: <FEATURE_BRANCH>                                ║
+║  Pull Request  : <PR_URL>                                        ║
 ║  Run date      : <YYYY-MM-DD>                                    ║
 ╚══════════════════════════════════════════════════════════════════╝
 
@@ -121,10 +200,28 @@ Skipped — BOM-managed (no version to patch):
 | test                  | ✅/❌  |
 | smoke check           | ✅/❌  |
 
-Fixes reverted (individual failures):
-| Package | Reason reverted |
-|---------|-----------------|
-| ...     | ...             |
+Flagged concerns:
+| Package / Area | Issue |
+|----------------|-------|
+| ...            | ...   |
+
+────────────────────────────────────────────────────────────────────
+🔍 STEP 4 — VERIFICATION (w2-verifier)
+────────────────────────────────────────────────────────────────────
+VERIFICATION_RESULT: <passed | issues_found>
+
+Checks:
+  Jira cross-check        : ✅/⚠️/❌
+  CVE manifest validation : ✅/❌  (X/X packages show safe version)
+  Regression check        : ✅/❌
+  Test coverage           : ✅/❌/⚠️
+  Acceptance criteria     : ✅/❌
+
+Coverage summary:
+  Tests run : X
+  Failures  : X
+  Errors    : X
+  Coverage  : X% / N/A
 
 ────────────────────────────────────────────────────────────────────
 ⚠️  FLAGGED FOR HUMAN REVIEW
@@ -136,12 +233,13 @@ Fixes reverted (individual failures):
 ────────────────────────────────────────────────────────────────────
 📊 SUMMARY
 ────────────────────────────────────────────────────────────────────
+  Pull Request                : <PR_URL>
   Feature branch              : <FEATURE_BRANCH>
   Dependabot alerts scanned   : X
   Fixes successfully applied  : X
-  Fixes reverted              : X
-  Skipped (BOM-managed)       : X
   Flagged for human review    : X
+  Skipped (BOM-managed)       : X
+  Verification result         : <passed | issues_found>
   Code Scanning alerts        : X (not auto-fixed — require manual code changes)
   Secret Scanning alerts      : X (not auto-fixed — require secret rotation)
   pom.xml final state         : ✅ compiles and tests pass / ⚠️ partial fixes only
@@ -150,7 +248,7 @@ Fixes reverted (individual failures):
 
 ---
 
-## Step 2 — Post Report as Jira Comment
+## Step 3 — Post Report as Jira Comment
 
 Write the compiled report to a temp file, then call the Python script:
 
@@ -158,11 +256,11 @@ Write the compiled report to a temp file, then call the Python script:
 # Write the report to a temp file
 $reportFile = $REPORT_TEMP_FILE
 @"
-<paste the full report text from Step 1 here>
+<paste the full report text from Step 2 here>
 "@ | Set-Content $reportFile -Encoding UTF8
 
 # Post as Jira comment
-python $JIRA_SCRIPT `
+& $PYTHON_CMD $JIRA_SCRIPT `
   comment --ticket <JIRA_TICKET_ID> --body-file "$reportFile"
 ```
 
@@ -173,24 +271,25 @@ python $JIRA_SCRIPT `
 
 If the command exits non-zero:
 - Log the error
-- Continue to Step 3 — **always attempt the transition even if the comment failed**
+- Continue to Step 4 — **always attempt the transition even if the comment failed**
 - Include in final output: `⚠️ Jira comment post failed: <error>. Transition was still attempted.`
 
 ---
 
-## Step 3 — Transition the Jira Ticket
+## Step 4 — Transition the Jira Ticket
 
 Determine the target transition from the validation outcome:
 
 | Outcome | Condition | Target status |
 |---------|-----------|---------------|
-| ✅ Full fix | All applied fixes passed validation (0 reverted) | `$TRANSITION_DONE` |
-| ⚠️ Partial fix | At least 1 fix applied AND at least 1 reverted | `$TRANSITION_REVIEW` |
-| ❌ No fixes | Zero fixes applied OR all reverted | comment only — leave status unchanged |
+| ✅ Full fix | All applied fixes passed validation and verification passed | `$TRANSITION_DONE` |
+| ⚠️ Partial fix | At least 1 fix applied AND verification has warnings only | `$TRANSITION_REVIEW` |
+| ❌ Issues remain | Verification result is `issues_found` with ❌ checks | `$TRANSITION_REVIEW` |
+| ❌ No fixes | Zero fixes applied | comment only — leave status unchanged |
 
-**Step 3a — List available transitions:**
+**Step 4a — List available transitions:**
 ```powershell
-python $JIRA_SCRIPT `
+& $PYTHON_CMD $JIRA_SCRIPT `
   transitions --ticket <JIRA_TICKET_ID>
 ```
 
@@ -199,9 +298,9 @@ python $JIRA_SCRIPT `
 [{"id": "31", "name": "Done"}, {"id": "21", "name": "In Progress"}, ...]  // example — actual transition names come from Jira
 ```
 
-**Step 3b — Apply transition (skip if outcome is "No fixes"):**
+**Step 4b — Apply transition (skip if outcome is "No fixes"):**
 ```powershell
-python $JIRA_SCRIPT `
+& $PYTHON_CMD $JIRA_SCRIPT `
   transition --ticket <JIRA_TICKET_ID> --name "<$TRANSITION_DONE|$TRANSITION_REVIEW>"
 ```
 
@@ -218,7 +317,9 @@ If the transition command exits non-zero:
 
 ## Rules
 - Report real data only — never fabricate numbers, comment IDs, or statuses
+- If PR creation fails, log the error and continue — do not abort the workflow
 - Write the report to a temp file before posting — do NOT try to pass it inline
-- Always post the Jira comment even if the transition fails
+- Always post the Jira comment even if the PR or transition fails
 - Always attempt the Jira transition even if the comment fails
+- Include the PR URL in the report header — write "(PR creation failed)" if gh pr create failed
 - This report is the final artefact of Workflow 2; make it complete enough to hand off to a human reviewer

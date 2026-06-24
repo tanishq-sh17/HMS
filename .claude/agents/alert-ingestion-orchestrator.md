@@ -71,6 +71,10 @@ $JIRA_SCRIPT     = Join-Path $REPO_ROOT ($cfg.scripts.jira_ticket_manager -repla
 $CSV_GLOB        = Join-Path $REPO_ROOT ($cfg.csv.glob_pattern)
 $BASE_LABEL      = ($cfg.jira.labels | Select-Object -First 1)
 
+# Pre-convert paths that must be passed into Git Bash -c strings (bash treats \ as escape)
+$FETCH_SCRIPT_UNIX = $FETCH_SCRIPT -replace '\\', '/'
+$REPO_ROOT_UNIX    = $REPO_ROOT    -replace '\\', '/'
+
 Write-Host "Loaded: repo=$REPO_OWNER/$REPO_NAME  service=$SERVICE_NAME  jira=$JIRA_PROJECT"
 ```
 
@@ -98,7 +102,8 @@ REPO_ROOT = $REPO_ROOT
 GIT_BASH = $GIT_BASH
 GH_CMD = $GH_CMD
 PYTHON_CMD = $PYTHON_CMD
-FETCH_SCRIPT = $FETCH_SCRIPT
+FETCH_SCRIPT_UNIX = $FETCH_SCRIPT_UNIX
+REPO_ROOT_UNIX = $REPO_ROOT_UNIX
 CSV_GLOB = $CSV_GLOB
 SERVICE_NAME = $SERVICE_NAME
 REPO_OWNER = $REPO_OWNER
@@ -112,7 +117,7 @@ Run via powershell:
 If not authenticated → STOP with error "gh auth login required".
 
 ### 2. Run fetch_alerts.sh
-  & $GIT_BASH -c "$($FETCH_SCRIPT -replace '\\','/') $REPO_ROOT $SERVICE_NAME $REPO_OWNER $REPO_NAME"
+  & $GIT_BASH -c "$FETCH_SCRIPT_UNIX $REPO_ROOT_UNIX $SERVICE_NAME $REPO_OWNER $REPO_NAME"
 
 ### 3. Resolve CSV path
   Get-ChildItem $CSV_GLOB | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
@@ -156,10 +161,11 @@ CSV_PATH = <CSV_PATH>
 REPO_ROOT = $REPO_ROOT
 CSV_GLOB = $CSV_GLOB
 SERVICE_NAME = $SERVICE_NAME
+PYTHON_CMD = $PYTHON_CMD
 
 ## Step: Group alerts by service
 Run via powershell:
-  python -c "
+  & $PYTHON_CMD -c "
   import csv, glob, os
   SERVICE = '$SERVICE_NAME'
   files = sorted(glob.glob(r'$CSV_GLOB'), key=os.path.getmtime, reverse=True)
@@ -220,6 +226,7 @@ JIRA_PROJECT = $JIRA_PROJECT
 BASE_LABEL = $BASE_LABEL
 CSV_GLOB = $CSV_GLOB
 SERVICE_NAME = $SERVICE_NAME
+PYTHON_CMD = $PYTHON_CMD
 
 ## For each service in SERVICE_NAMES, run in order:
 
@@ -236,7 +243,7 @@ Parse JIRA_KEY from JSON output. Set JIRA_STATUS = CREATED.
 If command fails → log exact error, continue to next service.
 
 ### C. Update CSV
-  python -c "
+  & $PYTHON_CMD -c "
   import csv, glob, os
   SERVICE = '$SERVICE_NAME'
   files = sorted(glob.glob(r'$CSV_GLOB'), key=os.path.getmtime, reverse=True)

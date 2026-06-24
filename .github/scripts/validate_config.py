@@ -84,6 +84,27 @@ def validate(config_path: str) -> bool:
     if not services:
         errors.append("  [MISSING] services — at least one service entry is required")
 
+    # ── Jira template checks ──────────────────────────────────────
+    valid_columns = {"ghsa_id", "cve_id", "title", "severity", "created", "due", "ageDays", "nonCompliant", "url"}
+    ticket_table_columns = get_nested(cfg, "jira.ticket_table_columns")
+    if ticket_table_columns is not None:
+        if not isinstance(ticket_table_columns, list) or len(ticket_table_columns) == 0:
+            errors.append("  [INVALID] jira.ticket_table_columns must be a non-empty list")
+        else:
+            unknown = [c for c in ticket_table_columns if c not in valid_columns]
+            if unknown:
+                errors.append(
+                    f"  [INVALID] jira.ticket_table_columns contains unknown column(s): {unknown}. "
+                    f"Valid values: {sorted(valid_columns)}"
+                )
+
+    summary_template = get_nested(cfg, "jira.ticket_summary_template")
+    if summary_template is not None:
+        if "{service_name}" not in summary_template:
+            errors.append("  [INVALID] jira.ticket_summary_template must contain the '{service_name}' placeholder")
+        if "{severity_summary}" not in summary_template:
+            errors.append("  [INVALID] jira.ticket_summary_template must contain the '{severity_summary}' placeholder")
+
     if errors:
         print(f"\nConfig validation FAILED ({len(errors)} error(s)):\n", file=sys.stderr)
         for e in errors:

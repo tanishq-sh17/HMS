@@ -73,11 +73,16 @@ $cfg = $cfgJson | ConvertFrom-Json
 $REPO_ROOT      = $cfg.environment.repo_root
 $GIT_BASH       = $cfg.tools.git_bash
 $GH_CMD         = $cfg.tools.gh
+$PYTHON_CMD     = $cfg.tools.python
 $REPO_NAME      = $cfg.environment.repo_name
 $FETCH_SCRIPT   = Join-Path $REPO_ROOT ($cfg.scripts.fetch_alerts -replace '/', '\')
 $CSV_OUT_DIR    = Join-Path $REPO_ROOT $cfg.csv.output_dir
 $SERVICE_NAME   = $cfg.environment.service_name
 $REPO_OWNER     = $cfg.environment.repo_owner
+
+# Pre-convert paths that go into Git Bash -c strings (bash treats \ as escape)
+$FETCH_SCRIPT_UNIX = $FETCH_SCRIPT -replace '\\', '/'
+$CSV_OUT_DIR_UNIX  = $CSV_OUT_DIR  -replace '\\', '/'
 
 Write-Host "Config loaded: repo_root=$REPO_ROOT  service=$SERVICE_NAME"
 ```
@@ -91,10 +96,17 @@ Look for ✓ `Logged in to github.com` with token scopes including **`repo`** an
 
 If not authenticated → STOP and tell the user to run `gh auth login`.
 
+### 1.5. Verify jq availability
+`fetch_alerts.sh` requires `jq`. The script attempts to add it to PATH from known locations, but confirm it is reachable first:
+```powershell
+& $GIT_BASH -c "jq --version"
+```
+If this fails → STOP and tell the user to install jq from https://jqlang.github.io/jq/
+
 ### 2. Run the script from the repo root using Git Bash
 ```powershell
 & $GIT_BASH -c "$GH_CMD auth status"
-& $GIT_BASH -c "$($FETCH_SCRIPT -replace '\\', '/') $CSV_OUT_DIR $SERVICE_NAME $REPO_OWNER $REPO_NAME"
+& $GIT_BASH -c "$FETCH_SCRIPT_UNIX $CSV_OUT_DIR_UNIX $SERVICE_NAME $REPO_OWNER $REPO_NAME"
 ```
 
 The script will automatically:

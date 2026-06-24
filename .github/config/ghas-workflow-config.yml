@@ -35,7 +35,7 @@ environment:
 # Use just the binary name (e.g. "gh") if it is on PATH.
 # --------------------------------------------------------------
 tools:
-  git_bash: "C:\\Program Files\\Git\\bin\\bash.exe"  # Windows: full path to bash.exe from Git for Windows
+  git_bash: "C:\\Program Files\\Git\\bin\\bash.exe"  # Windows (Git for Windows default). macOS/Linux: change to "bash". Non-standard Git install: update to your actual bash.exe path.
   gh: gh                            # GitHub CLI binary
   jq: jq                            # jq binary
   python: python                    # Python 3 binary
@@ -56,9 +56,10 @@ jira:
 
   assignee: null                    # Jira accountId string, or null for unassigned
   parent_jira: null                 # Parent epic key (e.g. HMS-5), or null
-  story_points: 3                   # Story points for new tickets
+  story_points: 3                    # Story points for new tickets
   team: null                        # Team name, or null to leave blank
   priority: High                    # Ticket priority — set by business, not mapped per severity
+  issue_type: Bug                   # Jira issue type (Bug / Task / Story / Security Finding)
 
   # Template for the ticket summary (title) line.
   # Placeholders: {service_name}  {severity_summary}  (e.g. "Critical-2, High-5, Medium-3, Low-1")
@@ -66,7 +67,7 @@ jira:
 
   # Columns shown in the Dependabot alert table inside the ticket description.
   # Available columns: ghsa_id, cve_id, title, severity, created, due, ageDays, nonCompliant, url
-  ticket_table_columns: [ghsa_id, cve_id, title]
+  ticket_table_columns: [ghsa_id, cve_id, title, nonCompliant]
 
   # Status-aware duplicate detection.
   # A NEW ticket is created only when the existing ticket's status is NOT in this list.
@@ -127,6 +128,16 @@ workflow2:
   gradle_path: ./gradlew            # Gradle wrapper path, relative to repo_root
   test_command: null                # Custom test command; null = default (mvn test / gradle test)
 
+  # Application start command for the smoke check.
+  # null = auto-detect: maven → "spring-boot:run", gradle → "bootRun"
+  # Override when your app needs special startup args (e.g. a profile flag).
+  start_command: null
+
+  # JaCoCo coverage report path relative to repo_root.
+  # null = auto-detect: maven  → target/site/jacoco/jacoco.xml
+  #                     gradle → build/reports/jacoco/test/jacocoTestReport.xml
+  coverage_report_path: null
+
   # Project manifest file (relative to repo_root)
   manifest_path: pom.xml            # pom.xml for Maven projects; build.gradle for Gradle
 
@@ -134,12 +145,15 @@ workflow2:
   source_root: src/main/java
 
   # Smoke check — application health verification after fixes
-  smoke_check_url: http://localhost:8080/api/v1/actuator/health
+  smoke_check_url: http://localhost:8080/api/v1/swagger-ui/index.html
   smoke_check_timeout_seconds: 60       # Seconds to wait for app startup before health probe
   smoke_check_request_timeout_seconds: 15  # HTTP request timeout for the health probe itself
 
   # Human-approval gate overrides
   auto_approve_minor: false         # true = MINOR version upgrades skip the approval prompt
+  # WARNING: setting auto_approve_critical: true skips human review for ALL CRITICAL fixes,
+  # including MAJOR version bumps with breaking API changes. Keep false unless you have
+  # pre-verified that every critical upgrade in the plan is safe to apply automatically.
   auto_approve_critical: false      # true = CRITICAL fixes skip the approval prompt
 
   # GitHub API pagination
@@ -214,3 +228,4 @@ validation:
   # These filesystem paths must exist on disk.
   required_paths:
     - environment.repo_root
+

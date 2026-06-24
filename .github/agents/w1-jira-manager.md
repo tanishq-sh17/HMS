@@ -69,19 +69,15 @@ Process one service group at a time.
 $cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
 $cfg = $cfgJson | ConvertFrom-Json
 
-$REPO_ROOT        = $cfg.environment.repo_root
-$GIT_BASH         = $cfg.tools.git_bash
-$SERVICE_NAME     = $cfg.environment.service_name
-$JIRA_SCRIPT      = Join-Path $REPO_ROOT ($cfg.scripts.jira_ticket_manager -replace '/', '\')
-$JIRA_PROJECT     = $cfg.jira.project_key
-$JIRA_SITE_URL    = $cfg.jira.site_url
-$BASE_LABEL       = ($cfg.jira.labels | Select-Object -First 1)
-$PRIORITY         = $cfg.jira.priority
-$STORY_POINTS     = $cfg.jira.story_points
-$SKIP_STATUSES    = $cfg.jira.skip_statuses_for_duplicate_check
-$CSV_GLOB         = Join-Path $REPO_ROOT ($cfg.csv.glob_pattern)
-$TICKET_COLUMNS   = $cfg.jira.ticket_table_columns -join ","
-$SUMMARY_TEMPLATE = $cfg.jira.ticket_summary_template
+$REPO_ROOT     = $cfg.environment.repo_root
+$GIT_BASH      = $cfg.tools.git_bash
+$PYTHON_CMD    = $cfg.tools.python
+$SERVICE_NAME  = $cfg.environment.service_name
+$JIRA_SCRIPT   = Join-Path $REPO_ROOT ($cfg.scripts.jira_ticket_manager -replace '/', '\')
+$JIRA_PROJECT  = $cfg.jira.project_key
+$BASE_LABEL    = ($cfg.jira.labels | Select-Object -First 1)
+$SKIP_STATUSES = $cfg.jira.skip_statuses_for_duplicate_check
+$CSV_GLOB      = Join-Path $REPO_ROOT ($cfg.csv.glob_pattern)
 
 Write-Host "Config loaded: jira=$JIRA_PROJECT  service=$SERVICE_NAME"
 ```
@@ -99,7 +95,7 @@ Write-Host "CSV: $CSV_PATH"
 
 Run `jira_ticket_manager.py search` and capture its JSON output:
 ```powershell
-python $JIRA_SCRIPT `
+& $PYTHON_CMD $JIRA_SCRIPT `
   search --project $JIRA_PROJECT --labels "$BASE_LABEL,<SERVICE_NAME>"
 ```
 
@@ -125,21 +121,14 @@ If no tickets returned at all → proceed to CREATE
 
 ---
 
-### 3. Create the Jira ticket (only if Step 2 returned empty array)
+### 3. Create the Jira ticket (only if Step 2 determined creation is needed)
 
-Run `jira_ticket_manager.py create` — it reads the CSV, computes severity counts, builds the ADF description, and calls the Jira API:
+Run `jira_ticket_manager.py create` — it reads the CSV, computes severity counts, builds the ADF description, and calls the Jira API.
+Priority, story points, table columns, and summary template are read from `ghas-workflow-config.yml` by the script automatically — do NOT pass them as flags:
 ```powershell
-python $JIRA_SCRIPT `
-  create --project $JIRA_PROJECT --service "<SERVICE_NAME>" --csv "<CSV_PATH>" --priority $PRIORITY --story-points $STORY_POINTS
+& $PYTHON_CMD $JIRA_SCRIPT `
+  create --project $JIRA_PROJECT --service "<SERVICE_NAME>" --csv "<CSV_PATH>"
 ```
-
-Use config-driven metadata while creating tickets:
-- Labels: `"$BASE_LABEL,<SERVICE_NAME>"`
-- Priority: `$PRIORITY`
-- Story points: `$STORY_POINTS`
-- Table columns: `$TICKET_COLUMNS`
-- Summary template: `$SUMMARY_TEMPLATE`
-- Jira site URL reference: `$JIRA_SITE_URL`
 
 **Expected output:**
 ```json
@@ -156,7 +145,7 @@ If the command exits non-zero → log the error, mark the service as FAILED, con
 
 Run the following once per service (replace `<SERVICE_NAME>`, `<JIRA_KEY>`, `<JIRA_STATUS>`):
 ```powershell
-python -c "
+& $PYTHON_CMD -c "
 import csv, glob, os
 
 SERVICE = '$SERVICE_NAME'

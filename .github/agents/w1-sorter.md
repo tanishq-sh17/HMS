@@ -60,6 +60,7 @@ $cfg = $cfgJson | ConvertFrom-Json
 
 $REPO_ROOT    = $cfg.environment.repo_root
 $GIT_BASH     = $cfg.tools.git_bash
+$PYTHON_CMD   = $cfg.tools.python
 $SERVICE_NAME = $cfg.environment.service_name
 $CSV_GLOB     = Join-Path $REPO_ROOT ($cfg.csv.glob_pattern)
 
@@ -75,8 +76,8 @@ Get-ChildItem $CSV_GLOB | Sort-Object LastWriteTime -Descending | Select-Object 
 ### 2. Read and group the CSV file
 Run the following inline Python to extract, group, and compute compliance counts:
 
-```bash
-python -c "
+```powershell
+& $PYTHON_CMD -c "
 import csv, glob, os
 
 SERVICE = '$SERVICE_NAME'

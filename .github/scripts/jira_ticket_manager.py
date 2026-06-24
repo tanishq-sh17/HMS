@@ -125,13 +125,16 @@ def get_auth():
     load_env()
     email    = os.environ.get("JIRA_EMAIL", "")
     token    = os.environ.get("JIRA_API_TOKEN", "")
-    base_url = os.environ.get("JIRA_BASE_URL", "https://tanishqshrivas.atlassian.net")
+    base_url = os.environ.get("JIRA_BASE_URL") or os.environ.get("JIRA_URL", "")
 
     if not email or not token:
         print("ERROR: JIRA_EMAIL and JIRA_API_TOKEN must be set in .env or environment.", file=sys.stderr)
         sys.exit(1)
     if "your_jira_api_token_here" in token:
         print("ERROR: JIRA_API_TOKEN is still the placeholder value. Update .env with your real token.", file=sys.stderr)
+        sys.exit(1)
+    if not base_url:
+        print("ERROR: JIRA_BASE_URL (or JIRA_URL) must be set in .env or environment.", file=sys.stderr)
         sys.exit(1)
 
     creds   = b64encode(f"{email}:{token}".encode()).decode()
@@ -157,12 +160,19 @@ def jira_request(method, url, headers, **kwargs):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def cmd_search(args):
-    """Search Jira for GHAS tickets by label. Returns ALL statuses so the caller
-    can apply the skip_statuses_for_duplicate_check logic from config."""
+    """Search Jira for GHAS tickets. Accepts --jql for a raw JQL query, or
+    --project + --labels for a label-based search. Returns ALL statuses so the
+    caller can apply the skip_statuses_for_duplicate_check logic from config."""
     base_url, headers = get_auth()
-    labels = [l.strip() for l in args.labels.split(",")]
-    label_clauses = " AND ".join(f'labels = "{l}"' for l in labels)
-    jql = f'project = "{args.project}" AND {label_clauses} ORDER BY created DESC'
+    if args.jql:
+        jql = args.jql
+    else:
+        if not args.project or not args.labels:
+            print("ERROR: --project and --labels are required when --jql is not provided.", file=sys.stderr)
+            sys.exit(1)
+        labels = [l.strip() for l in args.labels.split(",")]
+        label_clauses = " AND ".join(f'labels = "{l}"' for l in labels)
+        jql = f'project = "{args.project}" AND {label_clauses} ORDER BY created DESC'
     params = {"jql": jql, "fields": "summary,status,labels,priority", "maxResults": 50}
     url  = f"{base_url}/rest/api/3/search/jql"
     resp = jira_request("GET", url, headers, params=params)
@@ -241,7 +251,12 @@ def build_adf_description(service_name, grouped_alerts):
     Includes a compliance/non-compliance breakdown table after the severity summary.
     """
     jira_cfg      = get_jira_config()
-    include_cols  = jira_cfg.get("template", {}).get("include_columns", ["ghsa_id", "cve_id", "title"])
+    # Support both config key names: ticket_table_columns (new) and template.include_columns (legacy)
+    include_cols  = (
+        jira_cfg.get("ticket_table_columns")
+        or jira_cfg.get("template", {}).get("include_columns")
+        or ["ghsa_id", "cve_id", "title"]
+    )
 
     dep_alerts = [a for a in grouped_alerts if a.get("type") == "dependabot"]
     cs_alerts  = [a for a in grouped_alerts if a.get("type") == "code-scanning"]
@@ -432,12 +447,19 @@ def cmd_create(args):
         if sev in sev_totals:
             sev_totals[sev] += 1
 
-    sev_parts = [f"{k.capitalize()}-{v}" for k, v in sev_totals.items() if v > 0]
-    summary   = f"Address GHAS vulnerabilities for {args.service} [{', '.join(sev_parts)}]"
+    sev_parts       = [f"{k.capitalize()}-{v}" for k, v in sev_totals.items() if v > 0]
+    severity_summary = ", ".join(sev_parts)
 
     # Priority — read from config (set by business, not severity-mapped)
     jira_cfg = get_jira_config()
     priority = jira_cfg.get("priority", "High")
+
+    # Ticket summary — read template from config, fall back to built-in default
+    summary_template = jira_cfg.get(
+        "ticket_summary_template",
+        "Address GHAS vulnerabilities for {service_name} [{severity_summary}]"
+    )
+    summary = summary_template.format(service_name=args.service, severity_summary=severity_summary)
 
     # Labels — base from config + service name appended
     base_labels = list(jira_cfg.get("labels", ["GHAS"]))
@@ -449,7 +471,7 @@ def cmd_create(args):
     payload = {
         "fields": {
             "project":     {"key": args.project},
-            "issuetype":   {"name": "Bug"},
+            "issuetype":   {"name": jira_cfg.get("issue_type", "Bug")},
             "summary":     summary,
             "priority":    {"name": priority},
             "labels":      labels,
@@ -464,8 +486,11 @@ def cmd_create(args):
 
     if assignee:
         payload["fields"]["assignee"] = {"accountId": assignee}
+    # story_points is a Jira custom field — the field ID varies per instance (e.g. customfield_10016).
+    # Set jira.story_points_field in config to the correct field ID for your Jira board.
     if story_points is not None:
-        payload["fields"]["story_points"] = story_points
+        story_points_field = jira_cfg.get("story_points_field", "story_points")
+        payload["fields"][story_points_field] = story_points
     if parent_jira:
         payload["fields"]["parent"] = {"key": parent_jira}
 
@@ -619,8 +644,9 @@ def main():
 
     # search
     p_search = sub.add_parser("search", help="Search for open GHAS tickets")
-    p_search.add_argument("--project", required=True)
-    p_search.add_argument("--labels",  required=True, help="Comma-separated labels, e.g. GHAS,HMS")
+    p_search.add_argument("--project", default=None, help="Jira project key (required unless --jql is used)")
+    p_search.add_argument("--labels",  default=None, help="Comma-separated labels, e.g. GHAS,HMS (required unless --jql is used)")
+    p_search.add_argument("--jql",     default=None, help="Raw JQL query string; overrides --project and --labels")
 
     # create
     p_create = sub.add_parser("create", help="Create one consolidated ticket for a service")
