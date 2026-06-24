@@ -43,14 +43,12 @@ If `FEEDBACK` is provided, regenerate the plan incorporating the feedback and no
 ### 0. Load Config
 
 ```powershell
-$cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
-$cfg = $cfgJson | ConvertFrom-Json
+# Variables pre-loaded by orchestrator — assign from values passed in this prompt (no YAML reload)
+$REPO_ROOT     = "<REPO_ROOT>"
+$SOURCE_ROOT   = "<SOURCE_ROOT>"
+$MANIFEST_PATH = "<MANIFEST_PATH>"
 
-$REPO_ROOT      = $cfg.environment.repo_root
-$SOURCE_ROOT    = Join-Path $REPO_ROOT ($cfg.workflow2.source_root -replace '/','\')
-$MANIFEST_PATH  = Join-Path $REPO_ROOT ($cfg.workflow2.manifest_path -replace '/','\')
-
-Write-Host "Config loaded: source_root=$SOURCE_ROOT  manifest=$MANIFEST_PATH"
+Write-Host "Variables loaded: source_root=$SOURCE_ROOT  manifest=$MANIFEST_PATH"
 ```
 
 ---

@@ -43,32 +43,18 @@ You never modify any file — verification only.
 ### 0. Load Config
 
 ```powershell
-$cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
-$cfg = $cfgJson | ConvertFrom-Json
-
-$REPO_ROOT      = $cfg.environment.repo_root
-$MANIFEST_PATH  = Join-Path $REPO_ROOT ($cfg.workflow2.manifest_path -replace '/','\')
-$SOURCE_ROOT    = Join-Path $REPO_ROOT ($cfg.workflow2.source_root   -replace '/','\')
-$JIRA_SCRIPT    = Join-Path $REPO_ROOT ($cfg.scripts.jira_ticket_manager -replace '/','\')
-$BUILD_TOOL     = if ($cfg.workflow2.build_tool) { $cfg.workflow2.build_tool } else { 'maven' }
-$MVN_CMD        = if ($cfg.tools.maven) { $cfg.tools.maven } else { 'mvn' }
-$GRADLE_CMD     = if ($cfg.workflow2.gradle_path) { $cfg.workflow2.gradle_path } else { './gradlew' }
-$GIT_BASH       = $cfg.tools.git_bash
-$PYTHON_CMD     = $cfg.tools.python
-$DEP_GROUPS     = $cfg.dependency_groups
-
-# Derive JaCoCo report path from config or build-tool convention
-$coverageRelPath = $cfg.workflow2.coverage_report_path
-if (-not $coverageRelPath) {
-    $coverageRelPath = if ($BUILD_TOOL -eq 'gradle') {
-        'build\reports\jacoco\test\jacocoTestReport.xml'
-    } else {
-        'target\site\jacoco\jacoco.xml'
-    }
-}
-$JACOCO_XML = Join-Path $REPO_ROOT ($coverageRelPath -replace '/', '\')
-
-Write-Host "Config loaded: manifest=$MANIFEST_PATH  jira_script=$JIRA_SCRIPT"
+# Variables pre-loaded by orchestrator — no YAML reload needed
+$REPO_ROOT     = "<REPO_ROOT>"
+$MANIFEST_PATH = "<MANIFEST_PATH>"
+$SOURCE_ROOT   = "<SOURCE_ROOT>"
+$JIRA_SCRIPT   = "<JIRA_SCRIPT>"
+$MVN_CMD       = "<MVN_CMD>"
+$GIT_BASH      = "<GIT_BASH>"
+$PYTHON_CMD    = "<PYTHON_CMD>"
+$DEP_GROUPS    = '<DEP_GROUPS_JSON>' | ConvertFrom-Json
+$BUILD_TOOL    = "<BUILD_TOOL>"
+$JACOCO_XML    = Join-Path $REPO_ROOT (if ($BUILD_TOOL -eq 'gradle') { 'build\reports\jacoco\test\jacocoTestReport.xml' } else { 'target\site\jacoco\jacoco.xml' })
+Write-Host "Variables loaded: manifest=$MANIFEST_PATH  jira_script=$JIRA_SCRIPT"
 ```
 
 ---
@@ -116,7 +102,7 @@ Re-run dependency tree and check for unexpected version resolutions:
 
 ```powershell
 Set-Location $REPO_ROOT
-& $MVN_CMD dependency:tree -q 2>&1 | Select-String -Pattern "ERROR|WARNING|WARN"
+& $MVN_CMD dependency:tree -q | Select-String -Pattern "ERROR|WARNING|WARN"
 ```
 
 Also confirm VALIDATION_RESULTS from @w2-validator show compile and all tests passed.
@@ -130,7 +116,7 @@ Run unit tests and check for JaCoCo report if available:
 
 ```powershell
 Set-Location $REPO_ROOT
-& $MVN_CMD test 2>&1 | Select-String -Pattern "Tests run|BUILD|FAILURE|ERROR" | Select-Object -Last 20
+& $MVN_CMD test | Select-String -Pattern "Tests run|BUILD|FAILURE|ERROR" | Select-Object -Last 20
 ```
 
 Check for JaCoCo report:

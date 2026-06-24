@@ -1,5 +1,5 @@
 ---
-description: Workflow 2 orchestrator for GHAS vulnerability management. Coordinates vulnerability resolution with four retry counters and human escalation paths: plan revision, build failure, review fix, and verification. Delegates to w2-context-builder, w2-planner, w2-fixer, w2-validator, w2-github-reviewer, w2-verifier, and w2-reporter in order.
+description: Workflow 2 orchestrator for GHAS vulnerability management. Coordinates vulnerability resolution with four retry counters and human escalation paths: plan revision, build failure, verify fix, and review fix. Delegates to w2-context-builder, w2-planner, w2-fixer, w2-validator, w2-verifier, and w2-reporter in order.
 tools:
   - powershell
 ---
@@ -35,8 +35,8 @@ This workflow has four retry counters. Each allows up to **3 total attempts**. W
 |---|---|---|
 | `PLAN_REVISION_ATTEMPTS` | User gives feedback on change plan | `"Too many plan revision cycles — escalate to team"` |
 | `BUILD_FAILURE_ATTEMPTS` | Build or unit tests fail | `"Too many build failures — escalate to engineer"` |
-| `REVIEW_FIX_ATTEMPTS` | Human requests implementation changes | `"Too many review fix cycles — reassign task"` |
 | `VERIFY_FIX_ATTEMPTS` | Verifier agent finds issues | `"Verification keeps failing — manual code review required"` |
+| `REVIEW_FIX_ATTEMPTS` | Human requests implementation changes | `"Too many review fix cycles — reassign task"` |
 
 When a counter reaches 3, emit the escalation message, stop the workflow, and leave the feature branch as-is.
 
@@ -45,26 +45,24 @@ When a counter reaches 3, emit the escalation message, stop the workflow, and le
 At every phase transition, emit a clear status line:
 
 ```
-🔄 Step 1/11 — Running w2-context-builder...
-✅ Step 1/11 — Context built: 15 alerts, 5 packages to fix (3 MINOR, 2 MAJOR)
-🔄 Step 2/11 — Creating feature branch...
-✅ Step 2/11 — Branch created: HMS-16-GHAS-log4j-core-and-3-more
-🔄 Step 3/11 — Running w2-planner (change plan)...
-✅ Step 3/11 — Change plan ready: 5 fixes proposed
-🔄 Step 4/11 — Presenting change plan for user review...
-✅ Step 4/11 — Plan approved
-🔄 Step 5/11 — Approval gate (per-fix)...
-✅ Step 5/11 — 4 of 5 fixes approved
-🔄 Step 6/11 — Running w2-fixer + w2-validator (attempt 1)...
-✅ Step 6/11 — Build passed
-🔄 Step 7/11 — Human review of implementation...
-✅ Step 7/11 — Implementation approved
-🔄 Step 8/11 — Committing changes...
-✅ Step 8/11 — Changes committed to branch
-🔄 Step 9/11 — Running w2-verifier...
-✅ Step 9/11 — Verification passed
-🔄 Step 10/11 — Running w2-reporter...
-✅ Step 10/11 — PR created, report posted to Jira, ticket transitioned
+🔄 Step 1/9 — Running w2-context-builder...
+✅ Step 1/9 — Context built: 15 alerts, 5 packages to fix (3 MINOR, 2 MAJOR)
+🔄 Step 2/9 — Creating feature branch...
+✅ Step 2/9 — Branch created: HMS-16-GHAS-log4j-core-and-3-more
+🔄 Step 3/9 — Running w2-planner (change plan)...
+✅ Step 3/9 — Change plan ready: 5 fixes proposed
+🔄 Step 4/9 — Presenting change plan for user review...
+✅ Step 4/9 — Plan approved
+🔄 Step 5/9 — Running w2-fixer + w2-validator (attempt 1)...
+✅ Step 5/9 — Build passed
+🔄 Step 6/9 — Running w2-verifier...
+✅ Step 6/9 — Verifier complete: passed
+🔄 Step 7/9 — Verification check...
+✅ Step 7/9 — Verification passed
+🔄 Step 8/9 — Human review of implementation...
+✅ Step 8/9 — Implementation approved, changes committed to branch
+🔄 Step 9/9 — Running w2-reporter...
+✅ Step 9/9 — PR created, report posted to Jira, ticket transitioned
 ```
 
 ## Configuration
@@ -116,6 +114,30 @@ $BRANCH_BASE   = $cfg.branch.base_branch
 $JIRA_SCRIPT   = Join-Path $REPO_ROOT ($cfg.scripts.jira_ticket_manager -replace '/', '\')
 
 Write-Host "Config OK: repo=$REPO_OWNER/$REPO_NAME  service=$SERVICE_NAME  jira=$JIRA_PROJECT"
+
+# Resolve ALL sub-agent variables here once — eliminates per-agent YAML reload
+$MANIFEST_PATH     = Join-Path $REPO_ROOT ($cfg.workflow2.manifest_path -replace '/', '\')
+$SOURCE_ROOT       = Join-Path $REPO_ROOT ($cfg.workflow2.source_root   -replace '/', '\')
+$CSV_GLOB_PATH     = Join-Path $REPO_ROOT ($cfg.csv.glob_pattern)
+$MVN_CMD           = $cfg.tools.maven
+$GH_CMD            = $cfg.tools.gh
+$JIRA_SITE_URL     = $cfg.jira.site_url
+$TRANSITION_DONE   = $cfg.jira.transition_done
+$TRANSITION_REVIEW = $cfg.jira.transition_in_review
+$SMOKE_URL         = $cfg.workflow2.smoke_check_url
+$SMOKE_TIMEOUT     = $cfg.workflow2.smoke_check_timeout_seconds
+$HTTP_TIMEOUT      = $cfg.workflow2.smoke_check_request_timeout_seconds
+$MYSQL_PORT        = $cfg.runtime.mysql_port
+$MYSQL_HOST        = $cfg.runtime.mysql_host
+$AUTO_MINOR        = $cfg.workflow2.auto_approve_minor
+$AUTO_CRITICAL     = $cfg.workflow2.auto_approve_critical
+$PAGE_SIZE         = $cfg.workflow2.dependabot_api_page_size
+$BUILD_TOOL        = $cfg.workflow2.build_tool
+$TEST_CMD          = $cfg.workflow2.test_command
+$START_CMD_CFG     = $cfg.workflow2.start_command
+$DEP_GROUPS_JSON   = ($cfg.dependency_groups | ConvertTo-Json -Compress -Depth 5)
+
+Write-Host "All sub-agent variables resolved — no per-agent YAML reload needed"
 ```
 
 If this step fails → stop immediately.
@@ -124,7 +146,7 @@ If this step fails → stop immediately.
 
 ## Step 1 — @w2-context-builder
 
-Pass: repo (`$REPO_OWNER/$REPO_NAME`), repo root, Jira ticket ID, `CONFIG_PATH`.
+Pass pre-resolved variables (no YAML reload needed): `$REPO_OWNER`, `$REPO_NAME`, `$REPO_ROOT`, `$SERVICE_NAME`, `$GIT_BASH`, `$PYTHON_CMD`, `$GH_CMD`, `$MANIFEST_PATH`, `$SOURCE_ROOT`, `$CSV_GLOB_PATH`, `$BUILD_TOOL`, `$PAGE_SIZE`, `$AUTO_MINOR`, `$AUTO_CRITICAL`, `$DEP_GROUPS_JSON`, and `JIRA_TICKET_ID`.
 
 Fetch open Dependabot alerts + manifest; read workflow config; classify each dependency version type (inline / property-backed / BOM-managed) and upgrade type (MINOR / MAJOR); audit sibling group consistency from config.
 
@@ -175,7 +197,7 @@ Store `FEATURE_BRANCH` = the created branch name.
 
 ## Step 3 — @w2-planner (first call)
 
-Pass: `CONTEXT_MAP` from Step 1, `CONFIG_PATH`, `FEEDBACK = ""` (empty on first call).
+Pass pre-resolved variables: `$REPO_ROOT`, `$SOURCE_ROOT`, `$MANIFEST_PATH`, `CONTEXT_MAP` from Step 1, and `FEEDBACK = ""` (empty on first call).
 
 Planner scans source files to find which vulnerable packages are actually imported; generates a CHANGE_PLAN with files to modify, proposed diff, and breakage risk per fix.
 
@@ -197,7 +219,7 @@ Display `CHANGE_PLAN` to the user in full (include the proposed diff).
 
 Ask the user:
 > Review the change plan above. Choose:
-> - **approve** — accept the plan and proceed to fix approval
+> - **approve** — accept the plan and proceed to implementation
 > - **feedback: <your comments>** — request changes to the plan
 > - **abort** — cancel the workflow without making any changes
 
@@ -206,6 +228,7 @@ Ask the user:
 - Stop. Inform the user: "Workflow aborted at plan review. No changes were made. Feature branch deleted."
 
 **If approve:**
+- Set `APPROVED_FIXES` = all fixes listed in `CHANGE_PLAN`
 - Proceed to Step 5.
 
 **If feedback:**
@@ -223,28 +246,7 @@ Else:
 
 ---
 
-## Step 5 — Approval Gate (per-fix)
-
-Display the approved plan's fix list. Ask the developer which fixes to apply:
-
-> Approve all? [yes] / Approve specific fixes? [e.g. 1,2,4] / Skip specific fixes? [e.g. skip 3] / Abort? [no]
-
-**Parse the response:**
-- `yes` → approve all fixes
-- `1,2,4` or similar → approve only the listed fix numbers
-- `skip 3` or similar → approve all except the listed numbers
-- `no` or `abort` → delete feature branch, stop
-
-**Auto-approval rules (read from config):**
-- If `auto_approve_critical: true` → automatically approve all CRITICAL fixes
-- If `auto_approve_minor: true` → automatically approve all MINOR fixes
-
-Build `APPROVED_FIXES` — the list of fix numbers approved for application.
-If zero fixes approved → delete feature branch, stop.
-
----
-
-## Step 6 — Implement + Build Loop (Build Failure counter)
+## Step 5 — Implement + Build Loop (Build Failure counter)
 
 ```
 BUILD_FAILURE_ATTEMPTS = 0
@@ -255,15 +257,15 @@ ATTEMPT = 1
 
 **Loop:**
 
-### 6a — @w2-fixer
-Pass: `CONFIG_PATH`, `APPROVED_FIXES`, `FAILURE_CONTEXT` (empty on first call), `ATTEMPT`.
+### 5a — @w2-fixer
+Pass pre-resolved variables: `$REPO_ROOT`, `$MANIFEST_PATH`, `$MVN_CMD`, `$GIT_BASH`, `APPROVED_FIXES`, `FAILURE_CONTEXT` (empty on first call), `ATTEMPT`.
 
 Capture from its output:
 - `FIXES_APPLIED` — list of packages fixed with before/after versions
 - `FIXES_SKIPPED` — BOM-managed or not-approved packages skipped
 
-### 6b — @w2-validator
-Pass: repo root, `FIXES_APPLIED`, `CONFIG_PATH`.
+### 5b — @w2-validator
+Pass pre-resolved variables: `$REPO_ROOT`, `$MANIFEST_PATH`, `$MVN_CMD`, `$GIT_BASH`, `$BUILD_TOOL`, `$TEST_CMD`, `$START_CMD_CFG`, `$SERVICE_NAME`, `$MYSQL_PORT`, `$SMOKE_URL`, `$SMOKE_TIMEOUT`, `$HTTP_TIMEOUT`, and `FIXES_APPLIED`.
 
 Capture from its output:
 - `VALIDATION_RESULTS` — per-check pass/fail
@@ -279,15 +281,53 @@ If BUILD_FAILURE_ATTEMPTS > MAX_BUILD_FAILURES:
   → Stop
 Else:
   ATTEMPT++
-  → Loop back to Step 6a (pass updated FAILURE_CONTEXT)
+  → Loop back to Step 5a (pass updated FAILURE_CONTEXT)
 ```
 
 **If `VALIDATION_STATUS = passed`:**
-- Proceed to Step 7.
+- Proceed to Step 6.
 
 ---
 
-## Step 7 — Human Reviews Implementation (Review Fix counter)
+## Step 6 — @w2-verifier
+
+Pass pre-resolved variables: `$REPO_ROOT`, `$MANIFEST_PATH`, `$SOURCE_ROOT`, `$MVN_CMD`, `$GIT_BASH`, `$PYTHON_CMD`, `$JIRA_SCRIPT`, `$DEP_GROUPS_JSON`, plus `CONTEXT_MAP`, `JIRA_TICKET_ID`, `FEATURE_BRANCH`, `VALIDATION_RESULTS`.
+
+Verifier performs: Jira cross-check → CVE manifest validation → regression check → test coverage → acceptance criteria.
+
+Capture from its output:
+- `VERIFICATION_RESULT` — `passed` or `issues_found`
+- `ISSUES` — list of specific problems (if `issues_found`)
+- `COVERAGE_SUMMARY` — test counts and coverage %
+
+---
+
+## Step 7 — Verification Loop (Verify Fix counter)
+
+```
+VERIFY_FIX_ATTEMPTS = 0
+MAX_VERIFY_FIXES = 3
+```
+
+**If `VERIFICATION_RESULT = passed`:**
+- Proceed to Step 8.
+
+**If `VERIFICATION_RESULT = issues_found`:**
+```
+VERIFY_FIX_ATTEMPTS++
+If VERIFY_FIX_ATTEMPTS > MAX_VERIFY_FIXES:
+  → HUMAN INTERVENTION: "Verification keeps failing — manual code review required"
+  → Leave branch as-is
+  → Stop
+Else:
+  → Pass ISSUES as FAILURE_CONTEXT to @w2-fixer (ATTEMPT = VERIFY_FIX_ATTEMPTS + 1)
+  → Re-invoke Step 5a (@w2-fixer) → Step 5b (@w2-validator) → Step 6 (@w2-verifier)
+  → Loop back to top of Step 7
+```
+
+---
+
+## Step 8 — Human Reviews Implementation (Review Fix counter)
 
 ```
 REVIEW_FIX_ATTEMPTS = 0
@@ -296,7 +336,7 @@ MAX_REVIEW_FIXES = 3
 
 **Loop:**
 
-Show the user the `VALIDATION_RESULTS` summary.
+Show the user the `VALIDATION_RESULTS` summary and `VERIFICATION_RESULT`.
 
 Ask the user:
 > Review the implemented fixes above. Choose:
@@ -314,7 +354,7 @@ Ask the user:
   $MANIFEST = $cfg.workflow2.manifest_path
   & $GIT_BASH -c "git add $MANIFEST && git commit -m 'fix($SERVICE_NAME): address GHAS vulnerabilities [$JIRA_TICKET_ID]'"
   ```
-- Proceed to Step 8.
+- Proceed to Step 9.
 
 **If fix requested:**
 ```
@@ -324,72 +364,35 @@ If REVIEW_FIX_ATTEMPTS > MAX_REVIEW_FIXES:
   → Leave branch as-is
   → Stop
 Else:
-  → Invoke @w2-github-reviewer
-    Pass: REVIEW_COMMENTS = <user's fix request text>, CONTEXT_MAP, CONFIG_PATH
-    Capture: SUGGESTED_FIXES
-  → Pass SUGGESTED_FIXES as FAILURE_CONTEXT to @w2-fixer
+  → Pass review comments directly as FAILURE_CONTEXT to @w2-fixer
     Re-invoke @w2-fixer (ATTEMPT = REVIEW_FIX_ATTEMPTS + 1)
   → Re-invoke @w2-validator
-  → Loop back to top of Step 7 (present updated results)
+  → Re-invoke @w2-verifier
+  → Loop back to top of Step 8 (present updated results)
 ```
 
 ---
 
-## Step 8 — @w2-verifier
+## Step 9 — @w2-reporter
 
-Pass: `CONTEXT_MAP`, `JIRA_TICKET_ID`, `FEATURE_BRANCH`, `VALIDATION_RESULTS`, `CONFIG_PATH`.
-
-Verifier performs: Jira cross-check → CVE manifest validation → regression check → test coverage → acceptance criteria.
-
-Capture from its output:
-- `VERIFICATION_RESULT` — `passed` or `issues_found`
-- `ISSUES` — list of specific problems (if `issues_found`)
-- `COVERAGE_SUMMARY` — test counts and coverage %
-
----
-
-## Step 9 — Verification Loop (Verify Fix counter)
-
-```
-VERIFY_FIX_ATTEMPTS = 0
-MAX_VERIFY_FIXES = 3
-```
-
-**If `VERIFICATION_RESULT = passed`:**
-- Proceed to Step 10.
-
-**If `VERIFICATION_RESULT = issues_found`:**
-```
-VERIFY_FIX_ATTEMPTS++
-If VERIFY_FIX_ATTEMPTS > MAX_VERIFY_FIXES:
-  → HUMAN INTERVENTION: "Verification keeps failing — manual code review required"
-  → Leave branch as-is
-  → Stop
-Else:
-  → Pass ISSUES as FAILURE_CONTEXT to @w2-fixer (ATTEMPT = VERIFY_FIX_ATTEMPTS + 1)
-  → Re-invoke @w2-fixer → @w2-validator → @w2-verifier
-  → Loop back to top of Step 9
-```
-
----
-
-## Step 10 — @w2-reporter
-
-Pass everything explicitly:
-- `CONFIG_PATH`
+Pass everything explicitly (pre-resolved — no CONFIG_PATH needed):
+- `$SERVICE_NAME`, `$REPO_OWNER`, `$REPO_NAME`, `$REPO_ROOT`, `$GIT_BASH`, `$PYTHON_CMD`, `$MVN_CMD`, `$JIRA_SCRIPT`, `$JIRA_SITE_URL`, `$TRANSITION_DONE`, `$TRANSITION_REVIEW`, `$BRANCH_BASE`
 - `CONTEXT_MAP` from Step 1
 - `FEATURE_BRANCH` from Step 2
 - `JIRA_TICKET_ID`
-- `FIXES_APPLIED`, `FIXES_SKIPPED` from Step 6
-- `VALIDATION_RESULTS` from Step 6
-- `VERIFICATION_RESULT`, `ISSUES`, `COVERAGE_SUMMARY` from Step 8
+- `FIXES_APPLIED`, `FIXES_SKIPPED` from Step 5
+- `VALIDATION_RESULTS` from Step 5
+- `VERIFICATION_RESULT`, `ISSUES`, `COVERAGE_SUMMARY` from Step 6
 - Service name: `$SERVICE_NAME`, Repo: `$REPO_OWNER/$REPO_NAME`
 
-Reporter will:
-1. Push the feature branch and create a GitHub PR
-2. Compile a full end-to-end report (Dependabot fixes + Code Scanning + Secret Scanning summary + verification result)
-3. Post the report as a comment on the Jira ticket
-4. Transition the ticket: full fix + verification passed → **Done** | partial or issues → **In Review**
+Reporter will create the GitHub PR with all four mandatory elements:
+
+1. **Linked to Jira ticket** — PR title/body includes `$JIRA_TICKET_ID` with a direct link; Jira ticket is transitioned to **Done** (full fix + verification passed) or **In Review** (partial / issues remain)
+2. **Summary of changes** — human-readable list of packages upgraded (name, before → after version, CVEs addressed)
+3. **Test results attached** — `mvn test` pass/fail counts and `dependency:tree` diff included in PR body
+4. **Verified & ready for merge** — explicit statement that w2-verifier passed (CVEs addressed, no regressions, coverage threshold met); `verified` label added to the PR
+
+**If any of the four elements cannot be populated** (e.g. test results missing because validation was skipped) → reporter must stop and report the gap; do NOT create an incomplete PR.
 
 ---
 
@@ -405,7 +408,7 @@ Present the full report produced by **@w2-reporter**, including the PR URL.
 - Only the Jira ticket ID needs to be provided (or auto-looked up)
 - Never revert any fix — that is @w2-validator's job to report; the orchestrator retries or escalates
 - Always pass all sub-agent outputs explicitly to each subsequent sub-agent
-- Never invoke @w2-fixer before human approval is received (Step 5) — unless auto-approval rules in config bypass the gate
-- If the developer aborts at Step 4 or Step 5 → delete feature branch, make no changes
+- Never invoke @w2-fixer before the change plan is approved in Step 4
+- If the developer aborts at Step 4 → delete feature branch, make no changes
 - If a counter exceeds MAX → emit the exact escalation message, stop immediately, leave branch as-is
-- @w2-github-reviewer is only invoked when the user requests implementation changes in Step 7 — not on the approve path
+- All three retry loops (build failure, verify fix, review fix) re-enter the pipeline at Step 5a (@w2-fixer)

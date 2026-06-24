@@ -153,6 +153,22 @@ All `toEntity()` mapper methods must include `@BeanMapping(builder = @Builder(di
 
 ## GHAS Vulnerability Management
 
+### Prerequisites
+
+**GitHub CLI** — run `gh auth login` once. `fetch_alerts.sh` uses keyring auth — no token file needed.
+
+**Jira API** — required by `jira_ticket_manager.py` (used by W1 and W2):
+1. One-time install: `pip install requests python-dotenv pyyaml`
+2. Create `.env` at repo root:
+   ```
+   JIRA_BASE_URL=https://tanishqshrivas.atlassian.net
+   JIRA_EMAIL=<your-atlassian-account-email>
+   JIRA_API_TOKEN=<your-atlassian-api-token>
+   ```
+3. Verify: `python .github/scripts/jira_ticket_manager.py search --project HMS --labels GHAS`
+
+> ⚠️ The script tries `JIRA_URL` first, then falls back to `JIRA_BASE_URL`. Use `JIRA_BASE_URL` in `.env` to avoid silent failures.
+
 ### Jira Configuration
 | Setting | Value |
 |---|---|
@@ -169,12 +185,11 @@ A two-workflow, multi-agent system lives in `.github/agents/` for automated Depe
     w1-fetcher.md                     ← runs fetch_alerts.sh, produces CSV
     w1-sorter.md                      ← groups alerts by service
     w1-jira-manager.md                ← Jira dedup check + ticket creation
-    vuln-resolver-orchestrator.md     ← entry point for Workflow 2 (11-step)
+    vuln-resolver-orchestrator.md     ← entry point for Workflow 2 (9-step)
     w2-context-builder.md             ← fetches alerts + parses pom.xml
     w2-planner.md                     ← scans source; builds CHANGE_PLAN with proposed diff (no code written)
     w2-fixer.md                       ← patches pom.xml (CRITICAL first)
     w2-validator.md                   ← dep:tree + compile + test + smoke check
-    w2-github-reviewer.md             ← translates human review comments → SUGGESTED_FIXES
     w2-verifier.md                    ← Jira cross-check + CVE manifest + regression + coverage gate
     w2-reporter.md                    ← creates GitHub PR, posts Jira comment, transitions ticket
   config/
@@ -207,27 +222,26 @@ A two-workflow, multi-agent system lives in `.github/agents/` for automated Depe
 > `fetch_dependabot_alerts.py` (also in `.github/scripts/`) is a legacy script that produces Excel output for Dependabot alerts only — do not use it for Workflow 1.
 
 ### Workflow 2 — Vulnerability Resolver
-Only input needed: **Jira ticket ID** (e.g. `HMS-23`). All other settings come from `ghas-workflow-config.yml`. Steps run in order (11-step flow):
+Only input needed: **Jira ticket ID** (e.g. `HMS-23`). All other settings come from `ghas-workflow-config.yml`. Steps run in order (9-step flow):
 
 0. **Config validation** — loads `ghas-workflow-config.yml`, validates required fields; aborts on failure
 1. **`w2-context-builder`** — fetches open alerts + `pom.xml` via GitHub MCP; reads latest CSV; classifies each dependency as inline / property-backed / BOM-managed; audits sibling group consistency
 2. **Feature branch creation** — creates a `git checkout -b` branch using `branch.naming_single/multi` templates from config before any file is modified
 3. **`w2-planner`** — scans source files for actual imports; generates `CHANGE_PLAN` with proposed diff and breakage risk per fix; **no code written**
-4. **User review loop** (max 3 iterations) — presents `CHANGE_PLAN` for approval, revision, or abort; exceeding max → escalate
-5. **Per-fix approval gate** — developer approves all/specific fixes; respects `auto_approve_minor` / `auto_approve_critical` flags from config
-6. **`w2-fixer` + `w2-validator` loop** (max 3 build failures) — fixer patches `pom.xml` (CRITICAL first, property-backed preferred); validator runs `mvn dependency:tree` → `mvn compile` → `mvn test` → smoke check; build failure retries with failure context
-7. **Human reviews implementation** (max 3 review cycles) — if changes requested, `w2-github-reviewer` translates comments to `SUGGESTED_FIXES` → re-runs fixer + validator
-8. **Commit changes** — `git add pom.xml && git commit` to feature branch (only after human approval in step 7)
-9. **`w2-verifier`** (max 3 verify cycles) — Jira cross-check, CVE manifest validation, regression check, test coverage; issues found → re-run fixer chain
-10. **`w2-reporter`** — pushes feature branch, creates GitHub PR, posts full report to Jira, transitions ticket (Done / In Review)
+4. **User review loop** (max 3 iterations) — presents `CHANGE_PLAN` for approval, feedback, or abort; on approval **all planned fixes proceed** (no per-fix gate); exceeding max → escalate
+5. **`w2-fixer` + `w2-validator` loop** (max 3 build failures) — fixer patches `pom.xml` (CRITICAL first, property-backed preferred); validator runs `mvn dependency:tree` → `mvn compile` → `mvn test` → smoke check; build failure retries with failure context; **validator never reverts fixes**
+6. **`w2-verifier`** — Jira cross-check, CVE manifest validation, regression check, test coverage; issues found loop back to fixer+validator (max 3 verify cycles)
+7. **Verification loop** (max 3 cycles) — issues found → re-run fixer+validator+verifier; exceeding max → escalate
+8. **Human reviews implementation** — shows validation + verification results; approve → commit + proceed; fix requested → comments passed **directly** as `FAILURE_CONTEXT` to `w2-fixer` (no intermediary agent), then re-runs fixer+validator+verifier (max 3 review cycles)
+9. **`w2-reporter`** — pushes feature branch, creates GitHub PR with 4 mandatory elements: (1) linked to Jira ticket, (2) summary of changes (package name, before→after version, CVEs addressed), (3) test results attached, (4) verified & ready for merge; posts report to Jira; transitions ticket (Done / In Review)
 
 **Retry escalation messages:**
-| Counter | Escalation |
-|---|---|
-| Plan revisions > 3 | `"Too many plan revision cycles — escalate to team"` |
-| Build failures > 3 | `"Too many build failures — escalate to engineer"` |
-| Review fix cycles > 3 | `"Too many review fix cycles — reassign task"` |
-| Verify fix cycles > 3 | `"Verification keeps failing — manual code review required"` |
+| Counter | Trigger | Escalation |
+|---|---|---|
+| Plan revisions > 3 | User feedback on change plan | `"Too many plan revision cycles — escalate to team"` |
+| Build failures > 3 | Build or unit tests fail | `"Too many build failures — escalate to engineer"` |
+| Verify fix cycles > 3 | Verifier finds issues | `"Verification keeps failing — manual code review required"` |
+| Review fix cycles > 3 | Human requests implementation changes | `"Too many review fix cycles — reassign task"` |
 
 Fix strategy rules enforced by `@w2-fixer`:
 - **Property-backed versions** (`${some.version}`) → update `<properties>` block only — one change covers all usages (preferred)

@@ -34,41 +34,31 @@ You never revert any fix.
 Before running any validation, read the config to get runtime settings:
 
 ```powershell
-$cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
-$cfg = $cfgJson | ConvertFrom-Json
-
-$REPO_ROOT      = $cfg.environment.repo_root
-$GIT_BASH       = $cfg.tools.git_bash
-$BUILD_TOOL     = if ($cfg.workflow2.build_tool) { $cfg.workflow2.build_tool } else { 'maven' }
-$MVN_CMD        = if ($cfg.tools.maven) { $cfg.tools.maven } else { 'mvn' }
-$GRADLE_CMD     = if ($cfg.workflow2.gradle_path) { $cfg.workflow2.gradle_path } else { './gradlew' }
-$TEST_CMD       = $cfg.workflow2.test_command
-$MYSQL_PORT     = $cfg.runtime.mysql_port
-$APP_HOST       = $cfg.runtime.app_host
-$APP_PORT       = $cfg.runtime.app_port
-$SMOKE_URL      = $cfg.workflow2.smoke_check_url
-$SMOKE_TIMEOUT  = $cfg.workflow2.smoke_check_timeout_seconds
-$HTTP_TIMEOUT   = $cfg.workflow2.smoke_check_request_timeout_seconds
-$MANIFEST_PATH  = Join-Path $REPO_ROOT ($cfg.workflow2.manifest_path -replace '/','\')
-$SERVICE_NAME   = $cfg.environment.service_name
-$SAFE_SVC       = $SERVICE_NAME -replace '[^a-zA-Z0-9]', '-'
-
-# Determine start file and args for the smoke check (config-driven with build-tool fallback)
-$START_CMD_CFG = $cfg.workflow2.start_command
-if ($START_CMD_CFG) {
+# Variables pre-loaded by orchestrator — no YAML reload needed
+$REPO_ROOT     = "<REPO_ROOT>"
+$GIT_BASH      = "<GIT_BASH>"
+$BUILD_TOOL    = "<BUILD_TOOL>"
+$MVN_CMD       = "<MVN_CMD>"
+$TEST_CMD      = "<TEST_CMD>"
+$MYSQL_PORT    = "<MYSQL_PORT>"
+$MYSQL_HOST    = "<MYSQL_HOST>"
+$SMOKE_URL     = "<SMOKE_URL>"
+$SMOKE_TIMEOUT = "<SMOKE_TIMEOUT>"
+$HTTP_TIMEOUT  = "<HTTP_TIMEOUT>"
+$MANIFEST_PATH = "<MANIFEST_PATH>"
+$SERVICE_NAME  = "<SERVICE_NAME>"
+$START_CMD_CFG = "<START_CMD_CFG>"
+$SAFE_SVC      = $SERVICE_NAME -replace '[^a-zA-Z0-9]', '-'
+if ($START_CMD_CFG -and $START_CMD_CFG -ne '') {
     $SMOKE_START_FILE = $GIT_BASH
     $SMOKE_START_ARGS = @('-c', $START_CMD_CFG)
-} elseif ($BUILD_TOOL -eq 'gradle') {
-    $SMOKE_START_FILE = $GRADLE_CMD
-    $SMOKE_START_ARGS = @('bootRun')
 } else {
     $SMOKE_START_FILE = $MVN_CMD
     $SMOKE_START_ARGS = @('spring-boot:run')
 }
 $SMOKE_STDOUT = "$env:TEMP\$SAFE_SVC-smoke-stdout.txt"
 $SMOKE_STDERR = "$env:TEMP\$SAFE_SVC-smoke-stderr.txt"
-
-Write-Host "Config loaded: build=$BUILD_TOOL  smoke=$SMOKE_URL  manifest=$MANIFEST_PATH"
+Write-Host "Variables loaded: build=$BUILD_TOOL  smoke=$SMOKE_URL  manifest=$MANIFEST_PATH"
 ```
 
 Use `$MVN_CMD` (or `$GRADLE_CMD`) everywhere below instead of hardcoded `mvn`.
@@ -106,7 +96,7 @@ Stop and report to orchestrator — do NOT continue to Step 2.
 
 ### 2. Compile Check
 ```powershell
-& $MVN_CMD compile 2>&1
+& $MVN_CMD compile
 ```
 
 Capture full output. If exit code is non-zero:
@@ -126,9 +116,9 @@ Stop and report to orchestrator — do NOT continue to Step 3.
 if ($TEST_CMD) {
     Invoke-Expression $TEST_CMD
 } elseif ($BUILD_TOOL -eq 'gradle') {
-    & $GRADLE_CMD test 2>&1
+    & $GRADLE_CMD test
 } else {
-    & $MVN_CMD test 2>&1
+    & $MVN_CMD test
 }
 ```
 
@@ -157,7 +147,7 @@ if (-not $mysql) {
 Write-Host "MySQL check passed."
 ```
 
-If MySQL is not running → skip the smoke check, add to flagged concerns: `Smoke check skipped — MySQL not running on $($cfg.runtime.mysql_host):$MYSQL_PORT`, and continue to output.
+If MySQL is not running → skip the smoke check, add to flagged concerns: `Smoke check skipped — MySQL not running on ${MYSQL_HOST}:$MYSQL_PORT`, and continue to output.
 
 **4b. Start app and run health check**
 

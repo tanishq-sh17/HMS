@@ -41,27 +41,25 @@ You produce a complete context map for @w2-fixer.
 ### 0. Load Workflow Configuration
 
 ```powershell
-$cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
-$cfg = $cfgJson | ConvertFrom-Json
+# Variables pre-loaded by orchestrator — assign from values passed in this prompt (no YAML reload)
+$REPO_ROOT     = "<REPO_ROOT>"
+$GIT_BASH      = "<GIT_BASH>"
+$PYTHON_CMD    = "<PYTHON_CMD>"
+$REPO_OWNER    = "<REPO_OWNER>"
+$REPO_NAME     = "<REPO_NAME>"
+$SERVICE_NAME  = "<SERVICE_NAME>"
+$MANIFEST_PATH = "<MANIFEST_PATH>"
+$SOURCE_ROOT   = "<SOURCE_ROOT>"
+$CSV_GLOB      = "<CSV_GLOB_PATH>"
+$BUILD_TOOL    = "<BUILD_TOOL>"
+$PAGE_SIZE     = "<PAGE_SIZE>"
+$AUTO_MINOR    = "<AUTO_MINOR>"
+$AUTO_CRITICAL = "<AUTO_CRITICAL>"
+$GH_CMD        = "<GH_CMD>"
+$DEP_GROUPS    = '<DEP_GROUPS_JSON>' | ConvertFrom-Json
 
-$REPO_ROOT       = $cfg.environment.repo_root
-$GIT_BASH        = $cfg.tools.git_bash
-$PYTHON_CMD      = $cfg.tools.python
-$REPO_OWNER      = $cfg.environment.repo_owner
-$REPO_NAME       = $cfg.environment.repo_name
-$SERVICE_NAME    = $cfg.environment.service_name
-$MANIFEST_PATH   = Join-Path $REPO_ROOT ($cfg.workflow2.manifest_path -replace '/','\')
-$SOURCE_ROOT     = Join-Path $REPO_ROOT ($cfg.workflow2.source_root   -replace '/','\')
-$CSV_GLOB        = Join-Path $REPO_ROOT ($cfg.csv.glob_pattern)
-$BUILD_TOOL      = $cfg.workflow2.build_tool
-$PAGE_SIZE       = $cfg.workflow2.dependabot_api_page_size
-$AUTO_MINOR      = $cfg.workflow2.auto_approve_minor
-$AUTO_CRITICAL   = $cfg.workflow2.auto_approve_critical
-$GH_CMD          = $cfg.tools.gh
-$DEP_GROUPS      = $cfg.dependency_groups
-
-Write-Host "Config loaded: repo=$REPO_OWNER/$REPO_NAME  service=$SERVICE_NAME  build=$BUILD_TOOL"
-Write-Host "Dependency groups to audit: $($DEP_GROUPS | ForEach-Object { $_.name } | Join-String -Separator ', ')"
+Write-Host "Variables loaded: repo=$REPO_OWNER/$REPO_NAME  service=$SERVICE_NAME  build=$BUILD_TOOL"
+Write-Host "Dependency groups: $(($DEP_GROUPS | ForEach-Object { $_.name }) -join ', ')"
 ```
 
 ---

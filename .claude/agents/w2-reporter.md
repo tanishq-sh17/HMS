@@ -49,22 +49,20 @@ Your jobs in order:
 ## Step 0 — Load Config
 
 ```powershell
-$cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
-$cfg = $cfgJson | ConvertFrom-Json
-
-$SERVICE_NAME       = $cfg.environment.service_name
-$GIT_BASH           = $cfg.tools.git_bash
-$PYTHON_CMD         = $cfg.tools.python
-$REPO_OWNER         = $cfg.environment.repo_owner
-$REPO_NAME          = $cfg.environment.repo_name
-$REPO_ROOT          = $cfg.environment.repo_root
-$BASE_BRANCH        = $cfg.environment.base_branch
-$JIRA_SCRIPT        = Join-Path $REPO_ROOT ($cfg.scripts.jira_ticket_manager -replace '/', '\')
-$TRANSITION_DONE    = $cfg.jira.transition_done
-$TRANSITION_REVIEW  = $cfg.jira.transition_in_review
-$REPORT_TEMP_FILE   = "$env:TEMP\$($SERVICE_NAME.ToLower())_w2_report.txt"
-
-Write-Host "Config loaded: service=$SERVICE_NAME  base_branch=$BASE_BRANCH  done_transition=$TRANSITION_DONE"
+# Variables pre-loaded by orchestrator — no YAML reload needed
+$SERVICE_NAME      = "<SERVICE_NAME>"
+$GIT_BASH          = "<GIT_BASH>"
+$PYTHON_CMD        = "<PYTHON_CMD>"
+$REPO_OWNER        = "<REPO_OWNER>"
+$REPO_NAME         = "<REPO_NAME>"
+$REPO_ROOT         = "<REPO_ROOT>"
+$BASE_BRANCH       = "<BRANCH_BASE>"
+$JIRA_SCRIPT       = "<JIRA_SCRIPT>"
+$TRANSITION_DONE   = "<TRANSITION_DONE>"
+$TRANSITION_REVIEW = "<TRANSITION_REVIEW>"
+$jiraSiteUrl       = "<JIRA_SITE_URL>"
+$REPORT_TEMP_FILE  = "$env:TEMP\$($SERVICE_NAME.ToLower())_w2_report.txt"
+Write-Host "Variables loaded: service=$SERVICE_NAME  base_branch=$BASE_BRANCH  done_transition=$TRANSITION_DONE"
 ```
 
 ---
@@ -83,8 +81,7 @@ Set-Location $REPO_ROOT
 Build the PR body and create the PR:
 
 ```powershell
-$jiraSiteUrl = $cfg.jira.site_url
-$jiraLink    = "$jiraSiteUrl/browse/$JIRA_TICKET_ID"
+$jiraLink = "$jiraSiteUrl/browse/$JIRA_TICKET_ID"
 
 $prBody = @"
 ## Summary
@@ -315,6 +312,23 @@ If the transition command exits non-zero:
 
 ---
 
+## Step 5 — Switch Back to Main Branch
+
+After the Jira transition, always return the local repo to `$BASE_BRANCH`:
+
+```powershell
+Set-Location $REPO_ROOT
+& $GIT_BASH -c "git checkout $BASE_BRANCH"
+Write-Host "Switched back to $BASE_BRANCH"
+```
+
+If checkout fails:
+- Log the error
+- Include in final output: `⚠️ Could not switch back to $BASE_BRANCH — manual checkout required`
+- Do NOT abort; this is a cleanup step only
+
+---
+
 ## Rules
 - Report real data only — never fabricate numbers, comment IDs, or statuses
 - If PR creation fails, log the error and continue — do not abort the workflow
@@ -322,4 +336,5 @@ If the transition command exits non-zero:
 - Always post the Jira comment even if the PR or transition fails
 - Always attempt the Jira transition even if the comment fails
 - Include the PR URL in the report header — write "(PR creation failed)" if gh pr create failed
+- Always switch back to `$BASE_BRANCH` as the final cleanup step — never leave the repo on the feature branch
 - This report is the final artefact of Workflow 2; make it complete enough to hand off to a human reviewer

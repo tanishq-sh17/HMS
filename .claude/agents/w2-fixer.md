@@ -43,15 +43,13 @@ You then pass the changes log to @w2-validator.
 ### 0. Load Config and Read Manifest
 
 ```powershell
-$cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
-$cfg = $cfgJson | ConvertFrom-Json
+# Variables pre-loaded by orchestrator — assign from values passed in this prompt (no YAML reload)
+$REPO_ROOT     = "<REPO_ROOT>"
+$GIT_BASH      = "<GIT_BASH>"
+$MANIFEST_PATH = "<MANIFEST_PATH>"
+$MVN_CMD       = "<MVN_CMD>"
 
-$REPO_ROOT      = $cfg.environment.repo_root
-$GIT_BASH       = $cfg.tools.git_bash
-$MANIFEST_PATH  = Join-Path $REPO_ROOT ($cfg.workflow2.manifest_path -replace '/','\')
-$MVN_CMD        = $cfg.tools.maven
-
-Write-Host "Config loaded: manifest=$MANIFEST_PATH  maven=$MVN_CMD"
+Write-Host "Variables loaded: manifest=$MANIFEST_PATH  maven=$MVN_CMD"
 
 # Read manifest as source of truth for current versions
 Get-Content $MANIFEST_PATH -Raw

@@ -200,8 +200,7 @@ A two-workflow, multi-agent system lives in `.github/agents/` (mirrored in `.cla
     w2-planner.md                     ← change plan + proposed diff (replaces w2-rca)
     w2-fixer.md
     w2-validator.md
-    w2-github-reviewer.md             ← analyses reviewer comments, produces suggested fixes
-    w2-verifier.md                    ← comprehensive verification before PR creation
+    w2-verifier.md                    ← comprehensive verification before PR creation (runs before human review)
     w2-reporter.md
   scripts/                            ← scripts invoked by agents
     fetch_alerts.sh                   ← active: gh CLI → timestamped CSV (all alert types)
@@ -231,12 +230,12 @@ Only input needed: **Jira ticket ID** (e.g. `HMS-16`); everything else is fixed 
 1. **`w2-context-builder`** — fetches open alerts and `pom.xml`; reads latest CSV for context; classifies each dependency as inline / property-backed / BOM-managed; audits sibling group consistency for `jjwt-*`, `log4j-*`, `jackson-*`
 2. **Feature branch created** — before any file is modified (named `{jira_id}-GHAS-{primary_package}[-and-N-more]`)
 3. **`w2-planner`** — scans source files to find which vulnerable packages are actually imported; generates CHANGE_PLAN with proposed `pom.xml` diff and breakage risk; supports re-planning when user gives feedback (**Plan Revision counter**, max 3)
-4. **User approval gate** — per-fix approve/skip/abort; auto-approval rules in config can bypass for CRITICAL or MINOR
-5. **`w2-fixer`** — applies fixes CRITICAL first; property-backed preferred; updates all siblings when fixing one; supports re-run mode with FAILURE_CONTEXT to retry only failing fixes (**Build Failure counter**, max 3)
-6. **`w2-validator`** — `dependency:tree` → `compile` → `mvn test` → smoke check; on failure captures FAILURE_CONTEXT and reports to orchestrator — **never reverts anything**
-7. **Human reviews implementation** — approve / request fixes / abort; fix requests invoke `w2-github-reviewer` then loop back through fixer + validator (**Review Fix counter**, max 3)
-8. **`w2-verifier`** — Jira cross-check → CVE manifest validation → regression check → test coverage; outputs VERIFICATION_RESULT (passed/issues_found) (**Verify Fix counter**, max 3)
-9. **`w2-reporter`** — pushes branch, creates GitHub PR, compiles full report, posts as Jira comment, transitions ticket to Done / In Review
+4. **User approves plan** — approve / feedback+re-plan / abort; on approval all planned fixes proceed to implementation
+5. **`w2-fixer`** — applies all planned fixes; CRITICAL first; property-backed preferred; updates all siblings when fixing one; supports re-run mode with FAILURE_CONTEXT (**Build Failure counter**, max 3)
+6. **`w2-validator`** — `dependency:tree` → `compile` → `mvn test` → smoke check; on failure captures FAILURE_CONTEXT and loops back to fixer — **never reverts anything**
+7. **`w2-verifier`** — Jira cross-check → CVE manifest validation → regression check → test coverage; outputs VERIFICATION_RESULT (passed/issues_found); on issues loops back to fixer+validator (**Verify Fix counter**, max 3)
+8. **Human reviews implementation** — approve / request fixes / abort; fix requests pass review comments directly as FAILURE_CONTEXT and loop back through fixer + validator + verifier (**Review Fix counter**, max 3)
+9. **`w2-reporter`** — pushes branch, creates GitHub PR with four mandatory elements: (1) linked to Jira ticket, (2) summary of changes, (3) test results attached, (4) verified & ready for merge; posts report as Jira comment; transitions ticket to Done / In Review
 
 Fix strategy rules: property-backed → update `<properties>` only (preferred); inline → update `<version>` directly; BOM-managed → skip, noted in report.
 
