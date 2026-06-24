@@ -3,3 +3,6 @@ logs
 .codemie
 target
 .env
+*.csv
+*.docx
+*.pdf

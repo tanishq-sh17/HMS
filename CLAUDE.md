@@ -169,7 +169,7 @@ All tests are service-layer unit tests using Mockito (`@ExtendWith(MockitoExtens
 1. `pip install requests python-dotenv` (one-time setup)
 2. Fill in `.env` at repo root:
    ```
-   JIRA_URL=https://tanishqshrivas.atlassian.net   # also accepts JIRA_BASE_URL
+   JIRA_BASE_URL=https://tanishqshrivas.atlassian.net   # also accepted as JIRA_URL
    JIRA_EMAIL=<your-atlassian-account-email>
    JIRA_API_TOKEN=<your-atlassian-api-token>
    ```
@@ -197,9 +197,11 @@ A two-workflow, multi-agent system lives in `.github/agents/` (mirrored in `.cla
     w1-jira-manager.md
     vuln-resolver-orchestrator.md
     w2-context-builder.md
-    w2-rca.md                         ← RCA + impact analysis + proposed diff (human approval gate)
+    w2-planner.md                     ← change plan + proposed diff (replaces w2-rca)
     w2-fixer.md
     w2-validator.md
+    w2-github-reviewer.md             ← analyses reviewer comments, produces suggested fixes
+    w2-verifier.md                    ← comprehensive verification before PR creation
     w2-reporter.md
   scripts/                            ← scripts invoked by agents
     fetch_alerts.sh                   ← active: gh CLI → timestamped CSV (all alert types)
@@ -224,13 +226,19 @@ Steps run in order; any failure stops the workflow.
 
 ### Workflow 2 — Vulnerability Resolver
 
-Only input needed: **Jira ticket ID** (e.g. `HMS-16`); everything else is fixed config. Steps run in order; any failure stops the workflow.
+Only input needed: **Jira ticket ID** (e.g. `HMS-16`); everything else is fixed config. Four retry counters with human escalation (max 3 attempts each).
 
-1. **`w2-context-builder`** — uses GitHub MCP (`list_dependabot_alerts`, `get_file_contents`) to fetch open alerts and `pom.xml`; also reads the latest CSV for compliance/Code Scanning/Secret Scanning context; classifies each dependency as inline / property-backed / BOM-managed; audits sibling group consistency for `jjwt-*`, `log4j-*`, `jackson-*`
-2. **`w2-rca`** — for each vulnerability, performs RCA + impact analysis (checks if the package is actually imported in source); proposes a `pom.xml` diff **without applying it**; presents the diff to the developer for approval before `w2-fixer` runs
-3. **`w2-fixer`** — applies fixes CRITICAL first; property-backed preferred (one `<properties>` change covers all usages); updates all siblings in a group when fixing one; multiple CVEs on same package → use highest required safe version. Fix strategy: property-backed → update `<properties>` only; inline → update `<version>` directly; BOM-managed (no `<version>` tag) → skip, noted in report
-4. **`w2-validator`** — per-dependency `mvn dependency:tree` check first (adds `<dependencyManagement>` override if transitive pull detected); then `mvn compile` → `mvn test` → `spring-boot:run` health check; reverts individual failing fixes only, never the whole file
-5. **`w2-reporter`** — compiles full end-to-end report (Dependabot fixes + Code Scanning + Secret Scanning summary); posts report as Jira comment; transitions ticket to Done / In Review based on outcome; **does not raise a PR**
+1. **`w2-context-builder`** — fetches open alerts and `pom.xml`; reads latest CSV for context; classifies each dependency as inline / property-backed / BOM-managed; audits sibling group consistency for `jjwt-*`, `log4j-*`, `jackson-*`
+2. **Feature branch created** — before any file is modified (named `{jira_id}-GHAS-{primary_package}[-and-N-more]`)
+3. **`w2-planner`** — scans source files to find which vulnerable packages are actually imported; generates CHANGE_PLAN with proposed `pom.xml` diff and breakage risk; supports re-planning when user gives feedback (**Plan Revision counter**, max 3)
+4. **User approval gate** — per-fix approve/skip/abort; auto-approval rules in config can bypass for CRITICAL or MINOR
+5. **`w2-fixer`** — applies fixes CRITICAL first; property-backed preferred; updates all siblings when fixing one; supports re-run mode with FAILURE_CONTEXT to retry only failing fixes (**Build Failure counter**, max 3)
+6. **`w2-validator`** — `dependency:tree` → `compile` → `mvn test` → smoke check; on failure captures FAILURE_CONTEXT and reports to orchestrator — **never reverts anything**
+7. **Human reviews implementation** — approve / request fixes / abort; fix requests invoke `w2-github-reviewer` then loop back through fixer + validator (**Review Fix counter**, max 3)
+8. **`w2-verifier`** — Jira cross-check → CVE manifest validation → regression check → test coverage; outputs VERIFICATION_RESULT (passed/issues_found) (**Verify Fix counter**, max 3)
+9. **`w2-reporter`** — pushes branch, creates GitHub PR, compiles full report, posts as Jira comment, transitions ticket to Done / In Review
+
+Fix strategy rules: property-backed → update `<properties>` only (preferred); inline → update `<version>` directly; BOM-managed → skip, noted in report.
 
 ### Dependabot Schedule
 
