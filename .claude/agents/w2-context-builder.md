@@ -147,31 +147,49 @@ If the CSV is not found → log `[WARN] No CSV — continuing with gh CLI data o
 
 ---
 
-### 3. Read project manifest from disk
+### 3. Discover and read all pom.xml files
+
+First discover every pom.xml in the project, excluding `target/` build output directories:
 
 ```powershell
-Get-Content $MANIFEST_PATH -Raw
+$pomFiles = Get-ChildItem $REPO_ROOT -Recurse -Filter "pom.xml" |
+    Where-Object { $_.FullName -notlike "*\target\*" } |
+    Select-Object -ExpandProperty FullName
+Write-Host "Found $($pomFiles.Count) pom.xml file(s):"
+$pomFiles | ForEach-Object { Write-Host "  $_" }
 ```
 
-Show the full content. Do NOT truncate it. This is what @w2-fixer will edit.
+Read every discovered file in full — do NOT truncate any of them. Label each with its path:
+
+```powershell
+$pomFiles | ForEach-Object {
+    $label = if ($_ -eq $MANIFEST_PATH) { "(root)" } else { "(module)" }
+    Write-Host "=== $_ $label ==="
+    Get-Content $_ -Raw
+    Write-Host ""
+}
+```
+
+`$MANIFEST_PATH` is the root pom.xml (defined in config). Any additional files discovered are child module manifests. All may be edited by @w2-fixer.
 
 ---
 
 ### 4. Classify Each Vulnerable Dependency
 
-For each alert from Step 1, find the matching `<dependency>` block in the manifest output from Step 3 and classify:
+For each alert from Step 1, search **all discovered pom.xml files** for a matching `<dependency>` block. Record the exact file path where the version is declared — that is the file @w2-fixer must edit:
 
 | Type | How to identify | Fix strategy |
 |------|----------------|--------------|
-| **Inline** | `<version>2.14.1</version>` directly in `<dependency>` block | Update `<version>` tag |
-| **Property-backed** | `<version>${some.property}</version>` | Update property in `<properties>` block |
+| **Inline** | `<version>2.14.1</version>` directly in `<dependency>` block | Update `<version>` tag in that file |
+| **Property-backed** | `<version>${some.property}</version>` | Update property in `<properties>` block of whichever file defines it |
 | **BOM-managed** | No `<version>` tag present in `<dependency>` block | SKIP |
 
 **CVE deduplication**: If multiple CVEs map to the same package, collapse into one entry. Use the highest required safe version across all CVEs.
 
 Example collapsed entry:
 ```
-[HIGH] jackson-databind — property(jackson.version) — 2.13.2 → 2.14.2 — CVE-2020-36518, CVE-2022-42003, CVE-2022-42004  # example — actual value from config/runtime
+[HIGH] jackson-databind — property(jackson.version) — 2.13.2 → 2.14.2 — CVE-2020-36518, CVE-2022-42003, CVE-2022-42004
+  Declared in: pom.xml (root)  # example — actual file from discovery
 ```
 
 ---
@@ -179,7 +197,7 @@ Example collapsed entry:
 ### 5. Sibling Consistency Audit
 
 Read the `dependency_groups` list from config (loaded in Step 0 as `$DEP_GROUPS`).
-For each group in `$DEP_GROUPS`, find all listed artifacts in `$MANIFEST_PATH` and verify they share the same version.
+For each group in `$DEP_GROUPS`, search **all discovered pom.xml files** for each listed artifact and verify they share the same version across all files.
 
 ```powershell
 # Print dependency groups from config for reference
@@ -189,18 +207,20 @@ $DEP_GROUPS | ForEach-Object {
 }
 ```
 
-For each group, search `$MANIFEST_PATH` for each artifact and compare their versions.
-Report: Consistent ✅ or Pre-existing mismatch ⚠️.
+For each group, search every discovered pom.xml for each artifact and compare their versions.
+Report: Consistent ✅ or Pre-existing mismatch ⚠️ (include which file has the differing version).
 
 ---
 
-## Output to pass to @w2-rca (and ultimately @w2-fixer)
+## Output to pass to @w2-planner (and ultimately @w2-fixer)
 ```
 CONTEXT MAP
 ─────────────────────────────────────────
 Repo         : $REPO_OWNER/$REPO_NAME
 Jira ticket  : <JIRA_TICKET_ID>
-Manifest     : <full content — do not truncate>
+Manifests    : <list all discovered pom.xml paths>
+  Root       : <MANIFEST_PATH>
+  Modules    : <path1>, <path2>, ...  (or "none — single-module project")
 
 Build config:
   build_tool           : $BUILD_TOOL
@@ -208,9 +228,12 @@ Build config:
   auto_approve_critical: $AUTO_CRITICAL
 
 Fix Plan (sorted by severity):
-  1. [CRITICAL / MAJOR] log4j-core — inline — 2.14.1 → 2.17.2 — CVE-2021-44228      | age=Xd | overdue=1  # example — actual values from runtime
+  1. [CRITICAL / MAJOR] log4j-core — inline — 2.14.1 → 2.17.2 — CVE-2021-44228 | age=Xd | overdue=1
+     Declared in: pom.xml (root)
   2. [CRITICAL / MINOR] commons-collections — inline — 3.2.1 → 3.2.2 — CVE-2015-7501 | age=Xd | overdue=1
+     Declared in: pom.xml (root)
   3. [HIGH     / MINOR] jackson-databind — property(jackson.version) — 2.13.2 → 2.14.2 — CVE-2020-36518, CVE-2022-42003, CVE-2022-42004
+     Declared in: pom.xml (root)
 
 Skipped (BOM-managed):
   (none — or list packages)

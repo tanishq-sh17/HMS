@@ -40,8 +40,6 @@ $GIT_BASH      = "<GIT_BASH>"
 $BUILD_TOOL    = "<BUILD_TOOL>"
 $MVN_CMD       = "<MVN_CMD>"
 $TEST_CMD      = "<TEST_CMD>"
-$MYSQL_PORT    = "<MYSQL_PORT>"
-$MYSQL_HOST    = "<MYSQL_HOST>"
 $SMOKE_URL     = "<SMOKE_URL>"
 $SMOKE_TIMEOUT = "<SMOKE_TIMEOUT>"
 $HTTP_TIMEOUT  = "<HTTP_TIMEOUT>"
@@ -136,21 +134,6 @@ Stop and report to orchestrator — do NOT continue to Step 4.
 
 ### 4. Application Start Smoke Check
 
-**4a. MySQL prerequisite check**
-
-Before starting the application, confirm MySQL is listening on the configured port:
-```powershell
-$mysql = Get-NetTCPConnection -LocalPort $MYSQL_PORT -State Listen -ErrorAction SilentlyContinue
-if (-not $mysql) {
-    Write-Host "MYSQL_NOT_RUNNING — MySQL is not listening on port $MYSQL_PORT. Skipping smoke check."
-}
-Write-Host "MySQL check passed."
-```
-
-If MySQL is not running → skip the smoke check, add to flagged concerns: `Smoke check skipped — MySQL not running on ${MYSQL_HOST}:$MYSQL_PORT`, and continue to output.
-
-**4b. Start app and run health check**
-
 ```powershell
 Set-Location $REPO_ROOT
 
@@ -198,8 +181,15 @@ FAILURE_CONTEXT:
   Error   : <HTTP status or exception message>
   Suspect : <package most likely responsible, or "startup error">
   Detail  : <last 10 lines of app stdout/stderr>
+SMOKE_STATUS: failed
 ```
 Stop and report to orchestrator.
+
+If the smoke check is skipped for any reason (e.g. start command not configured):
+```
+SMOKE_STATUS: skipped
+```
+Set `VALIDATION_STATUS: passed` and continue to output — but `SMOKE_STATUS: skipped` MUST be included so the orchestrator surfaces this gap to the user.
 
 ---
 
@@ -223,11 +213,9 @@ Build checks:
   dependency tree   : ✅ PASSED
   compile           : ✅ PASSED
   tests             : ✅ PASSED
-  health check      : ✅ PASSED
+  health check      : ✅ PASSED / ⚠️ SKIPPED
 
-Flagged concerns:
-  ⚠️  Smoke check skipped — MySQL not running (if applicable)
-
+SMOKE_STATUS: passed | skipped        # Gap 11 fix: explicit field so orchestrator can surface skip to user
 VALIDATION_STATUS: passed
 ```
 
@@ -247,6 +235,7 @@ FAILURE_CONTEXT:
   Suspect : <package>
   Detail  : <additional context>
 
+SMOKE_STATUS: failed | skipped
 VALIDATION_STATUS: failed
 ```
 
@@ -255,4 +244,4 @@ VALIDATION_STATUS: failed
 - On any failure, capture FAILURE_CONTEXT and stop immediately — do not run further steps
 - Always re-run `dependency:tree` after adding a `<dependencyManagement>` override
 - A validation is only `passed` when all four steps complete without error
-- MySQL not running causes smoke check skip (flagged concern) — not a FAILURE_CONTEXT
+- Gap 11 fix: always emit `SMOKE_STATUS: passed | skipped | failed` as a separate field. `VALIDATION_STATUS: passed` does NOT imply the smoke check ran — the orchestrator must check `SMOKE_STATUS` and surface `skipped` to the user before Step 8 human review

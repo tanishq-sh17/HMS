@@ -40,7 +40,7 @@ You then pass the changes log to @w2-validator.
 
 ## Steps
 
-### 0. Load Config and Read Manifest
+### 0. Load Config and Read All Manifests
 
 ```powershell
 # Variables pre-loaded by orchestrator — assign from values passed in this prompt (no YAML reload)
@@ -48,12 +48,22 @@ $REPO_ROOT     = "<REPO_ROOT>"
 $GIT_BASH      = "<GIT_BASH>"
 $MANIFEST_PATH = "<MANIFEST_PATH>"
 $MVN_CMD       = "<MVN_CMD>"
+$DEP_GROUPS    = '<DEP_GROUPS_JSON>' | ConvertFrom-Json  # used in "Verify all changes" block
 
 Write-Host "Variables loaded: manifest=$MANIFEST_PATH  maven=$MVN_CMD"
 
-# Read manifest as source of truth for current versions
-Get-Content $MANIFEST_PATH -Raw
+# Discover all pom.xml files (same logic as w2-context-builder — excludes target/)
+$pomFiles = Get-ChildItem $REPO_ROOT -Recurse -Filter "pom.xml" |
+    Where-Object { $_.FullName -notlike "*\target\*" } |
+    Select-Object -ExpandProperty FullName
+Write-Host "pom.xml files in scope: $($pomFiles.Count)"
+$pomFiles | ForEach-Object { Write-Host "  $_" }
+
+# Read all manifests as source of truth for current versions
+$pomFiles | ForEach-Object { Get-Content $_ -Raw }
 ```
+
+**Per-fix file path**: `CONTEXT_MAP` includes a `Declared in:` field for each fix. Always use that file path when applying a fix — do NOT default to `$MANIFEST_PATH` unless `CONTEXT_MAP` explicitly lists the root pom.xml as the declaration file.
 
 ---
 
@@ -86,10 +96,10 @@ For every package in the approved fix plan, apply the correct strategy:
 
 #### Strategy A — Property-backed version (PREFERRED)
 
-Identify the property name from the manifest (e.g. `<jackson.version>2.13.2</jackson.version>`), then run:
+Use `$FIX_MANIFEST_PATH` — the file listed in `Declared in:` for this fix in `CONTEXT_MAP`. Identify the property name from that file:
 
 ```powershell
-$manifest = $MANIFEST_PATH
+$manifest = "<FIX_MANIFEST_PATH>"  # from CONTEXT_MAP "Declared in:" for this package
 $content = Get-Content $manifest -Raw
 $updated = $content -replace '<jackson\.version>2\.13\.2</jackson\.version>', '<jackson.version>2.14.2</jackson.version>'
 if ($updated -eq $content) {
@@ -108,10 +118,10 @@ Adapt the regex and version numbers for each package.
 
 #### Strategy B — Inline version
 
-Find the exact `<dependency>` block and replace the `<version>` tag:
+Use `$FIX_MANIFEST_PATH` from `CONTEXT_MAP` for this fix. Find the exact `<dependency>` block and replace the `<version>` tag:
 
 ```powershell
-$manifest = $MANIFEST_PATH
+$manifest = "<FIX_MANIFEST_PATH>"  # from CONTEXT_MAP "Declared in:" for this package
 $content = Get-Content $manifest -Raw
 $updated = $content -replace '(<artifactId>log4j-core</artifactId>\s*<version>)2\.14\.1(</version>)', '${1}2.17.2${2}'
 if ($updated -eq $content) {
@@ -147,15 +157,21 @@ If a sibling uses an inline version different from the group → run Strategy B 
 ---
 
 ### Verify all changes in one pass
-After all edits, run:
+After all edits, run across every modified pom.xml:
 ```powershell
-# Build pattern from config dependency groups
-$patterns = $cfg.dependency_groups | ForEach-Object { $_.artifact_ids } | Select-Object -Unique
-$pattern  = ($patterns | Join-String -Separator "|")
-Select-String -Path $MANIFEST_PATH -Pattern $pattern -Context 0,1
+# Gap 5 fix: use $DEP_GROUPS (passed from orchestrator via CONTEXT_MAP), not $cfg.dependency_groups
+# ($cfg is never defined in the fixer's scope — referencing it throws a null error at runtime)
+# Also fixed: Join-String requires PS 6+; use -join which works in PS 5.1
+$patterns = $DEP_GROUPS | ForEach-Object { $_.artifact_ids } | Select-Object -Unique
+$pattern  = $patterns -join "|"
+# Search all discovered pom.xml files, not just the root
+$pomFiles | ForEach-Object {
+    Write-Host "=== Verifying: $_ ==="
+    Select-String -Path $_ -Pattern $pattern -Context 0,1
+}
 ```
 
-Confirm every fixed package shows its new version.
+Confirm every fixed package shows its new version in the correct file.
 Use `$MVN_CMD` instead of hardcoded `mvn` in any verification commands you run.
 
 ---

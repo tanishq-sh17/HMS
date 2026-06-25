@@ -71,20 +71,42 @@ $JIRA_SCRIPT     = Join-Path $REPO_ROOT ($cfg.scripts.jira_ticket_manager -repla
 $CSV_GLOB        = Join-Path $REPO_ROOT ($cfg.csv.glob_pattern)
 $BASE_LABEL      = ($cfg.jira.labels | Select-Object -First 1)
 
+# Gap 1 fix: Multi-service support — load services list; fall back to single SERVICE_NAME
+$SERVICES = if ($cfg.environment.services -and @($cfg.environment.services).Count -gt 0) {
+    @($cfg.environment.services)
+} else {
+    @($SERVICE_NAME)
+}
+
+# Gap 7 fix: Load skip_statuses here so it can be substituted into the w1-jira-manager prompt
+# ($SKIP_STATUSES is only defined inside w1-jira-manager's Step 0; the orchestrator prompt template
+#  needs the value substituted before passing it as a string to the sub-agent)
+$SKIP_STATUSES_STR = ($cfg.jira.skip_statuses_for_duplicate_check) -join ','
+
 # Pre-convert paths that must be passed into Git Bash -c strings (bash treats \ as escape)
 $FETCH_SCRIPT_UNIX = $FETCH_SCRIPT -replace '\\', '/'
 $REPO_ROOT_UNIX    = $REPO_ROOT    -replace '\\', '/'
 
-Write-Host "Loaded: repo=$REPO_OWNER/$REPO_NAME  service=$SERVICE_NAME  jira=$JIRA_PROJECT"
+Write-Host "Loaded: repo=$REPO_OWNER/$REPO_NAME  service=$SERVICE_NAME  jira=$JIRA_PROJECT  services=$($SERVICES -join ',')  skip_statuses=$SKIP_STATUSES_STR"
 ```
 
 If this step fails → **stop immediately**. Do not proceed to sub-agents.
 
 ---
 
-## Step 1 — Spawn w1-fetcher
+## Step 1 — Spawn w1-fetcher (once per service in `$SERVICES`)
 
-Emit: `🔄 Step 1/3 — Spawning w1-fetcher...`
+**Multi-service loop (Gap 1 fix):** Iterate over every entry in `$SERVICES`. Spawn one w1-fetcher sub-agent per service, substituting that service's name for `SERVICE_NAME` in the prompt below. Track per-service results in a `$serviceResults` hashtable keyed by service name. After all fetchers complete:
+
+```powershell
+$serviceResults    = @{}   # populated as each fetcher returns
+$ZERO_ALERT_SVCS   = @()   # services where ALERT_COUNT=0 — used in Step 3b
+$NONZERO_ALERT_SVCS = @()  # services with actual alerts — passed to Steps 2 & 3
+```
+
+Services with `ALERT_COUNT=0` do **not** stop the workflow — they are queued for ticket-closure in Step 3b.
+
+Emit: `🔄 Step 1/3 — Spawning w1-fetcher for <service> (<N> of <$($SERVICES.Count)>)...`
 
 Use the `task` tool:
 - `agent_type`: `"general-purpose"`
@@ -126,7 +148,7 @@ If not authenticated → STOP with error "gh auth login required".
   $csv = Get-ChildItem $CSV_GLOB | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
   (Get-Content $csv | Select-Object -Skip 1 | Where-Object { $_ -ne "" }).Count
 
-If count = 0 → STOP with error "No open alerts found".
+If count = 0 → emit ALERT_COUNT=0 and CONTINUE — do NOT stop. The orchestrator will check for open Jira tickets to close in Step 3b (Gap 6 fix).
 
 ## Output (required — orchestrator parses this)
 End your response with exactly:
@@ -134,10 +156,27 @@ End your response with exactly:
   ALERT_COUNT=<number>
 ```
 
-After the sub-agent completes, parse `CSV_PATH` and `ALERT_COUNT` from its output.
+After each service's sub-agent completes, parse `CSV_PATH` and `ALERT_COUNT` from its output.
 If it failed → STOP, report error to user.
 
-Emit: `✅ Step 1/3 — w1-fetcher complete: <ALERT_COUNT> alerts → <CSV_PATH>`
+```powershell
+$serviceResults["<SERVICE>"] = @{ CSV_PATH = "<CSV_PATH>"; ALERT_COUNT = <ALERT_COUNT> }
+if (<ALERT_COUNT> -eq 0) { $ZERO_ALERT_SVCS   += "<SERVICE>" }
+else                      { $NONZERO_ALERT_SVCS += "<SERVICE>" }
+```
+
+Emit: `✅ Step 1/3 — w1-fetcher (<service>): <ALERT_COUNT> alerts → <CSV_PATH>`
+
+After all services are fetched, summarise:
+
+```powershell
+$ALL_CSV_PATHS    = ($NONZERO_ALERT_SVCS | ForEach-Object { $serviceResults[$_].CSV_PATH }) -join ','
+$TOTAL_ALERT_COUNT = ($serviceResults.Values | ForEach-Object { $_.ALERT_COUNT } |
+                       Measure-Object -Sum).Sum
+Write-Host "Services with alerts: $($NONZERO_ALERT_SVCS -join ', ')  |  zero-alert: $($ZERO_ALERT_SVCS -join ', ')  |  total: $TOTAL_ALERT_COUNT"
+```
+
+If **all** services have `ALERT_COUNT=0`, skip Steps 2 and 3 entirely and proceed directly to Step 3b.
 
 ---
 
@@ -224,20 +263,25 @@ SERVICE_NAMES = <SERVICE_NAMES>  (comma-separated)
 JIRA_SCRIPT = $JIRA_SCRIPT
 JIRA_PROJECT = $JIRA_PROJECT
 BASE_LABEL = $BASE_LABEL
+SKIP_STATUSES = $SKIP_STATUSES_STR  (comma-separated, substituted by orchestrator — Gap 7 fix)
 CSV_GLOB = $CSV_GLOB
 SERVICE_NAME = $SERVICE_NAME
 PYTHON_CMD = $PYTHON_CMD
 
 ## For each service in SERVICE_NAMES, run in order:
 
-### A. Check for existing ticket
+### A. Search for existing active ticket
   & $PYTHON_CMD $JIRA_SCRIPT search --project $JIRA_PROJECT --labels "$BASE_LABEL,<SERVICE>"
 
-- Non-empty array → JIRA_KEY = result[0].key, JIRA_STATUS = SKIPPED → skip to C
-- Empty array [] → proceed to B
+Check if any returned ticket has a status in SKIP_STATUSES (the value passed above — already substituted by the orchestrator; load it as `$SKIP_STATUSES` from this prompt's variable block, not from YAML).
+- Active ticket found → run CVE delta detection (compare ticket description CVEs vs current CSV rows)
+  - New CVEs found → proceed to B with delta CSV (new rows only)
+  - No new CVEs → JIRA_KEY = existing key, JIRA_STATUS = SKIPPED → skip to C
+- No active ticket found → proceed to B with full CSV
 
-### B. Create ticket (only if A returned [])
-  & $PYTHON_CMD $JIRA_SCRIPT create --project $JIRA_PROJECT --service "<SERVICE>" --csv "<CSV_PATH>"
+### B. Create ticket (only when Step A determined creation is needed)
+  & $PYTHON_CMD $JIRA_SCRIPT create --project $JIRA_PROJECT --service "<SERVICE>" --csv "<CSV_TO_USE>"
+  # CSV_TO_USE = full CSV_PATH (fresh ticket) or delta temp CSV (new CVEs only)
 
 Parse JIRA_KEY from JSON output. Set JIRA_STATUS = CREATED.
 If command fails → log exact error, continue to next service.
@@ -269,8 +313,8 @@ If command fails → log exact error, continue to next service.
 
 ## Output (required — orchestrator parses this)
 End your response with exactly:
-  TICKETS_CREATED=<N>  (list each as SERVICE -> JIRA_KEY)
-  TICKETS_SKIPPED=<N>  (list each as SERVICE -> JIRA_KEY)
+  TICKETS_CREATED=<N>  (list each as SERVICE -> JIRA_KEY, note fresh or delta)
+  TICKETS_SKIPPED=<N>  (list each as SERVICE -> existing JIRA_KEY, reason: no new CVEs)
   TICKETS_FAILED=<N>
 ```
 
@@ -278,6 +322,44 @@ After the sub-agent completes, parse ticket counts from its output.
 If it failed entirely → STOP, report error.
 
 Emit: `✅ Step 3/3 — w1-jira-manager complete`
+
+---
+
+## Step 3b — Close Resolved Tickets (Zero-Alert Services)
+
+**Only runs when `$ZERO_ALERT_SVCS` is non-empty (Gap 6 fix).**
+
+For each service in `$ZERO_ALERT_SVCS`, GitHub reported 0 open alerts — any open Jira ticket for that service should be transitioned to Done.
+
+```powershell
+foreach ($svc in $ZERO_ALERT_SVCS) {
+    Write-Host "Zero-alert closure check for: $svc"
+    $searchOut = & $PYTHON_CMD $JIRA_SCRIPT `
+        search --project $JIRA_PROJECT --labels "$BASE_LABEL,$svc"
+    Write-Host $searchOut
+
+    # Parse tickets whose status is in $SKIP_STATUSES_STR (still open)
+    $openKeys = & $PYTHON_CMD -c "
+import json, sys
+tickets = json.loads('''$searchOut''')
+skip = [s.lower() for s in '$SKIP_STATUSES_STR'.split(',') if s]
+for t in tickets:
+    if t.get('status','').lower() in skip:
+        print(t['key'])
+"
+    foreach ($key in ($openKeys -split '\r?\n' | Where-Object { $_ -ne '' })) {
+        Write-Host "Transitioning $key to Done — all alerts resolved on GitHub"
+        & $PYTHON_CMD $JIRA_SCRIPT transition --ticket $key --name "Done"
+    }
+    if (-not $openKeys) {
+        Write-Host "No open tickets to close for $svc"
+    }
+}
+```
+
+Capture: `TICKETS_AUTO_CLOSED` = list of ticket keys transitioned to Done.
+
+Emit: `✅ Step 3b — Closed <N> resolved tickets: [<keys>]`
 
 ---
 
@@ -289,11 +371,11 @@ Print the summary box using values captured from sub-agent outputs:
 ╔══════════════════════════════════════════════════════╗
 ║      WORKFLOW 1 — ALERT INGESTION COMPLETE           ║
 ╠══════════════════════════════════════════════════════╣
-║  CSV file             : <CSV_PATH>                   ║
-║  Services scanned     : <N>                          ║
+║  Services processed   : <N> (<comma-list>)           ║
 ║  Total alerts         : <N> (<SEVERITY_BREAKDOWN>)   ║
-║  Jira tickets created : <N>  → [HMS-XX, ...]         ║  # example — actual value from config
-║  Jira tickets skipped : <N>  (duplicates)            ║
+║  Jira tickets created : <N>  → [HMS-XX, ...]         ║  # fresh or delta
+║  Jira tickets skipped : <N>  (no new CVEs)           ║
+║  Tickets auto-closed  : <N>  → [HMS-XX, ...] (0 alerts — resolved on GitHub)  ║
 ╚══════════════════════════════════════════════════════╝
 ```
 

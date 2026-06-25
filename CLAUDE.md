@@ -217,7 +217,7 @@ Steps run in order; any failure stops the workflow.
 
 1. **`w1-fetcher`** — runs `fetch_alerts.sh` via Git Bash using `gh` CLI (no `.env` token needed — run `gh auth login` once); fetches Dependabot, Code Scanning, and Secret Scanning alerts; writes a timestamped CSV to the repo root
 2. **`w1-sorter`** — reads the CSV, groups alerts by service into a dict; does NOT re-sort (already sorted by the script)
-3. **`w1-jira-manager`** — for each service, JQL-searches Jira (`project=HMS AND labels=GHAS AND labels=<SERVICE>`); skips if open ticket found, otherwise creates **one consolidated ticket per service** (all CVEs combined); updates CSV with Jira key + status
+3. **`w1-jira-manager`** — for each service, JQL-searches Jira (`project=HMS AND labels=GHAS AND labels=<SERVICE>`); if an active ticket exists (status in `skip_statuses`), extracts its CVE/GHSA IDs and compares against current alerts — creates a new ticket only for **net-new CVEs** (using a delta temp CSV); if no active ticket exists, creates a fresh consolidated ticket covering all current alerts; updates CSV with Jira key + status
 
 **Jira ticket title format:** `Address GHAS vulnerabilities for <SERVICE_NAME> [Critical-<N>, High-<N>, Medium-<N>, Low-<N>]`
 
@@ -227,14 +227,14 @@ Steps run in order; any failure stops the workflow.
 
 Only input needed: **Jira ticket ID** (e.g. `HMS-16`); everything else is fixed config. Four retry counters with human escalation (max 3 attempts each).
 
-1. **`w2-context-builder`** — fetches open alerts and `pom.xml`; reads latest CSV for context; classifies each dependency as inline / property-backed / BOM-managed; audits sibling group consistency for `jjwt-*`, `log4j-*`, `jackson-*`
+1. **`w2-context-builder`** — fetches open alerts; discovers **all `pom.xml` files** in the project (excludes `target/`), reads each one; reads latest CSV for context; classifies each dependency as inline / property-backed / BOM-managed and records which file declares the version (`Declared in:` field in CONTEXT_MAP); audits sibling group consistency for `jjwt-*`, `log4j-*`, `jackson-*` across all pom files
 2. **Feature branch created** — before any file is modified (named `{jira_id}-GHAS-{primary_package}[-and-N-more]`)
 3. **`w2-planner`** — scans source files to find which vulnerable packages are actually imported; generates CHANGE_PLAN with proposed `pom.xml` diff and breakage risk; supports re-planning when user gives feedback (**Plan Revision counter**, max 3)
 4. **User approves plan** — approve / feedback+re-plan / abort; on approval all planned fixes proceed to implementation
-5. **`w2-fixer`** — applies all planned fixes; CRITICAL first; property-backed preferred; updates all siblings when fixing one; supports re-run mode with FAILURE_CONTEXT (**Build Failure counter**, max 3)
+5. **`w2-fixer`** — applies all planned fixes; CRITICAL first; property-backed preferred; uses the `Declared in:` file path from CONTEXT_MAP per fix (supports multi-module projects — edits the correct child pom.xml, not always the root); updates all siblings when fixing one; supports re-run mode with FAILURE_CONTEXT (**Build Failure counter**, max 3)
 6. **`w2-validator`** — `dependency:tree` → `compile` → `mvn test` → smoke check; on failure captures FAILURE_CONTEXT and loops back to fixer — **never reverts anything**
 7. **`w2-verifier`** — Jira cross-check → CVE manifest validation → regression check → test coverage; outputs VERIFICATION_RESULT (passed/issues_found); on issues loops back to fixer+validator (**Verify Fix counter**, max 3)
-8. **Human reviews implementation** — approve / request fixes / abort; fix requests pass review comments directly as FAILURE_CONTEXT and loop back through fixer + validator + verifier (**Review Fix counter**, max 3)
+8. **Human reviews implementation** — approve / request fixes / abort; on approval, commits all modified tracked files via `git add -u` (covers root pom.xml, child module pom.xml files, and any `<dependencyManagement>` additions); fix requests pass review comments directly as FAILURE_CONTEXT and loop back through fixer + validator + verifier (**Review Fix counter**, max 3)
 9. **`w2-reporter`** — pushes branch, creates GitHub PR with four mandatory elements: (1) linked to Jira ticket, (2) summary of changes, (3) test results attached, (4) verified & ready for merge; posts report as Jira comment; transitions ticket to Done / In Review
 
 Fix strategy rules: property-backed → update `<properties>` only (preferred); inline → update `<version>` directly; BOM-managed → skip, noted in report.

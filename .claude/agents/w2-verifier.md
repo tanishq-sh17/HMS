@@ -82,17 +82,26 @@ If Jira is unreachable: log `[WARN] Jira unreachable — skipping cross-check` a
 
 ### 2. Validate All CVEs Are Addressed in Manifest
 
-For each fixed package in the fix plan, verify the safe version is now present in the manifest:
+**Gap 4 fix:** Check ALL discovered pom.xml files, not just the root. Fixes applied to child modules by w2-fixer would otherwise be reported as "still present" on the root, producing false negatives.
 
 ```powershell
-# Example: confirm log4j-core shows the safe version
-Select-String -Path $MANIFEST_PATH -Pattern "log4j-core|log4j\.version" -Context 0,1
+# Discover all pom.xml files (same logic as w2-context-builder — excludes target/)
+$pomFiles = Get-ChildItem $REPO_ROOT -Recurse -Filter "pom.xml" |
+    Where-Object { $_.FullName -notlike "*\target\*" } |
+    Select-Object -ExpandProperty FullName
+Write-Host "Checking $($pomFiles.Count) pom.xml file(s) for safe versions"
 
-# Example: confirm property-backed fix took effect
-Select-String -Path $MANIFEST_PATH -Pattern "jackson\.version" -Context 0,1
+# For each fixed package, search ALL pom.xml files
+$pomFiles | ForEach-Object {
+    Write-Host "=== $_ ==="
+    # Example: confirm log4j-core shows the safe version
+    Select-String -Path $_ -Pattern "log4j-core|log4j\.version" -Context 0,1
+    # Example: confirm property-backed fix took effect
+    Select-String -Path $_ -Pattern "jackson\.version" -Context 0,1
+}
 ```
 
-Report each package: ✅ safe version confirmed | ❌ old version still present
+Report each package: ✅ safe version confirmed (in at least one pom.xml) | ❌ old version still present in all checked files
 
 ---
 
@@ -140,11 +149,15 @@ Check the following:
 - Sibling groups still consistent — compare against sibling audit in CONTEXT_MAP
 
 ```powershell
-# Verify sibling group consistency
+# Gap 4 fix: check sibling consistency across ALL pom.xml files, not just the root
+# (reuse $pomFiles discovered in Step 2 above)
 $DEP_GROUPS | ForEach-Object {
     Write-Host "Checking group: $($_.name)"
     $_.artifact_ids | ForEach-Object {
-        Select-String -Path $MANIFEST_PATH -Pattern $_ -Context 0,2 | Select-Object -First 1
+        $artifactId = $_
+        $pomFiles | ForEach-Object {
+            Select-String -Path $_ -Pattern $artifactId -Context 0,2 | Select-Object -First 1
+        }
     }
 }
 ```

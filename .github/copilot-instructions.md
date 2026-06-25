@@ -215,7 +215,7 @@ A two-workflow, multi-agent system lives in `.github/agents/` for automated Depe
 ### Workflow 1 — Alert Ingestion
 1. `@w1-fetcher` runs `fetch_alerts.sh` via Git Bash using the `gh` CLI — no `.env` required; run `gh auth login` once. Fetches Dependabot, Code Scanning, and Secret Scanning alerts; writes a timestamped CSV to the repo root.
 2. `@w1-sorter` reads the CSV and groups alerts by service for the Jira manager
-3. `@w1-jira-manager` searches Jira by `GHAS` + service label — skips if found, creates one consolidated ticket per service if not; updates CSV with Jira key + status
+3. `@w1-jira-manager` searches Jira by `GHAS` + service label — if an active ticket exists (status in `skip_statuses`), compares its CVE/GHSA IDs against current alerts and creates a new ticket only for **net-new CVEs** (using a filtered delta CSV); if no active ticket exists, creates a fresh consolidated ticket for all current alerts; updates CSV with Jira key + status
 
 **CSV columns:** `service` | `type` | `ghsa_id` | `cve_id` | `title` | `severity` | `created` | `due` | `url` | `Application` | `nonCompliant` | `ageDays` | **`jira_key`** | **`jira_status`**
 
@@ -225,14 +225,14 @@ A two-workflow, multi-agent system lives in `.github/agents/` for automated Depe
 Only input needed: **Jira ticket ID** (e.g. `HMS-23`). All other settings come from `ghas-workflow-config.yml`. Steps run in order (9-step flow):
 
 0. **Config validation** — loads `ghas-workflow-config.yml`, validates required fields; aborts on failure
-1. **`w2-context-builder`** — fetches open alerts + `pom.xml` via GitHub MCP; reads latest CSV; classifies each dependency as inline / property-backed / BOM-managed; audits sibling group consistency
+1. **`w2-context-builder`** — fetches open alerts; discovers **all `pom.xml` files** in the project (excludes `target/`), reads each one; reads latest CSV; classifies each dependency as inline / property-backed / BOM-managed and records which file declares the version (`Declared in:` field in CONTEXT_MAP); audits sibling group consistency across all pom files
 2. **Feature branch creation** — creates a `git checkout -b` branch using `branch.naming_single/multi` templates from config before any file is modified
 3. **`w2-planner`** — scans source files for actual imports; generates `CHANGE_PLAN` with proposed diff and breakage risk per fix; **no code written**
 4. **User review loop** (max 3 iterations) — presents `CHANGE_PLAN` for approval, feedback, or abort; on approval **all planned fixes proceed** (no per-fix gate); exceeding max → escalate
-5. **`w2-fixer` + `w2-validator` loop** (max 3 build failures) — fixer patches `pom.xml` (CRITICAL first, property-backed preferred); validator runs `mvn dependency:tree` → `mvn compile` → `mvn test` → smoke check; build failure retries with failure context; **validator never reverts fixes**
+5. **`w2-fixer` + `w2-validator` loop** (max 3 build failures) — fixer uses the `Declared in:` file path from CONTEXT_MAP per fix (supports multi-module projects — edits the correct child pom.xml, not always the root), applies fixes CRITICAL first with property-backed preferred; validator runs `mvn dependency:tree` → `mvn compile` → `mvn test` → smoke check; build failure retries with failure context; **validator never reverts fixes**
 6. **`w2-verifier`** — Jira cross-check, CVE manifest validation, regression check, test coverage; issues found loop back to fixer+validator (max 3 verify cycles)
 7. **Verification loop** (max 3 cycles) — issues found → re-run fixer+validator+verifier; exceeding max → escalate
-8. **Human reviews implementation** — shows validation + verification results; approve → commit + proceed; fix requested → comments passed **directly** as `FAILURE_CONTEXT` to `w2-fixer` (no intermediary agent), then re-runs fixer+validator+verifier (max 3 review cycles)
+8. **Human reviews implementation** — shows validation + verification results; approve → stages all modified tracked files via `git add -u` (covers root pom.xml, child module pom.xml files, and any `<dependencyManagement>` additions) then commits; fix requested → comments passed **directly** as `FAILURE_CONTEXT` to `w2-fixer` (no intermediary agent), then re-runs fixer+validator+verifier (max 3 review cycles)
 9. **`w2-reporter`** — pushes feature branch, creates GitHub PR with 4 mandatory elements: (1) linked to Jira ticket, (2) summary of changes (package name, before→after version, CVEs addressed), (3) test results attached, (4) verified & ready for merge; posts report to Jira; transitions ticket (Done / In Review)
 
 **Retry escalation messages:**

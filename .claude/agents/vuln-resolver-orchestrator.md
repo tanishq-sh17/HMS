@@ -115,6 +115,28 @@ $JIRA_SCRIPT   = Join-Path $REPO_ROOT ($cfg.scripts.jira_ticket_manager -replace
 
 Write-Host "Config OK: repo=$REPO_OWNER/$REPO_NAME  service=$SERVICE_NAME  jira=$JIRA_PROJECT"
 
+# Gap 14 fix: Validate the Jira ticket belongs to the correct project and service
+if ($JIRA_TICKET_ID -notmatch "^$([regex]::Escape($JIRA_PROJECT))-\d+$") {
+    Write-Host "ERROR: Ticket '$JIRA_TICKET_ID' does not match project key '$JIRA_PROJECT' — aborting"
+    exit 1
+}
+$ticketSearch = & $PYTHON_CMD $JIRA_SCRIPT search --jql "key = $JIRA_TICKET_ID" 2>&1
+if ($LASTEXITCODE -ne 0 -or -not $ticketSearch) {
+    Write-Host "ERROR: Cannot fetch ticket $JIRA_TICKET_ID — check ticket ID and Jira auth"
+    exit 1
+}
+$ticketLabels = & $PYTHON_CMD -c "
+import json, sys
+t = json.loads('''$ticketSearch''')
+t = t[0] if isinstance(t, list) else t
+print(','.join(t.get('labels', [])))
+"
+if ($ticketLabels -notmatch [regex]::Escape($SERVICE_NAME)) {
+    Write-Host "WARNING: Ticket $JIRA_TICKET_ID labels ($ticketLabels) do not include service '$SERVICE_NAME'."
+    Write-Host "Proceeding, but verify this ticket is for the intended service before continuing."
+}
+Write-Host "Ticket validation passed: $JIRA_TICKET_ID belongs to $JIRA_PROJECT (labels: $ticketLabels)"
+
 # Resolve ALL sub-agent variables here once — eliminates per-agent YAML reload
 $MANIFEST_PATH     = Join-Path $REPO_ROOT ($cfg.workflow2.manifest_path -replace '/', '\')
 $SOURCE_ROOT       = Join-Path $REPO_ROOT ($cfg.workflow2.source_root   -replace '/', '\')
@@ -127,8 +149,6 @@ $TRANSITION_REVIEW = $cfg.jira.transition_in_review
 $SMOKE_URL         = $cfg.workflow2.smoke_check_url
 $SMOKE_TIMEOUT     = $cfg.workflow2.smoke_check_timeout_seconds
 $HTTP_TIMEOUT      = $cfg.workflow2.smoke_check_request_timeout_seconds
-$MYSQL_PORT        = $cfg.runtime.mysql_port
-$MYSQL_HOST        = $cfg.runtime.mysql_host
 $AUTO_MINOR        = $cfg.workflow2.auto_approve_minor
 $AUTO_CRITICAL     = $cfg.workflow2.auto_approve_critical
 $PAGE_SIZE         = $cfg.workflow2.dependabot_api_page_size
@@ -173,6 +193,17 @@ $branchNamingMulti  = $cfg.branch.naming_multi
 ```powershell
 Set-Location $REPO_ROOT
 
+# Gap 6 fix: Abort if the working tree is dirty — uncommitted changes would contaminate the PR
+$dirtyFiles = & $GIT_BASH -c "git status --porcelain" 2>&1
+if ($dirtyFiles) {
+    Write-Host "ERROR: Uncommitted changes detected — aborting branch creation."
+    Write-Host "Dirty files:"
+    Write-Host $dirtyFiles
+    Write-Host "Please commit or stash all changes before running Workflow 2."
+    exit 1
+}
+Write-Host "Working tree clean — safe to create feature branch."
+
 # Confirm we are on the expected base branch from config
 git branch --show-current
 
@@ -213,7 +244,26 @@ PLAN_REVISION_ATTEMPTS = 0
 MAX_PLAN_REVISIONS = 3
 ```
 
-**Loop:**
+**Gap 1 fix — check auto_approve flags before presenting to user:**
+
+```powershell
+$allMinor    = ($CHANGE_PLAN -notmatch '\[MAJOR\]')
+$hasCritical = ($CHANGE_PLAN -match '\[CRITICAL\]')
+
+if ($AUTO_MINOR -and $allMinor) {
+    Write-Host "AUTO-APPROVED: auto_approve_minor=true and all fixes are MINOR — skipping manual review."
+    $APPROVED_FIXES = "<all fixes from CHANGE_PLAN>"
+    # Skip the review loop and proceed directly to Step 5
+} elseif ($AUTO_CRITICAL -and $hasCritical) {
+    Write-Host "AUTO-APPROVED: auto_approve_critical=true and CRITICAL fixes present — skipping manual review."
+    $APPROVED_FIXES = "<all fixes from CHANGE_PLAN>"
+    # Skip the review loop and proceed directly to Step 5
+} else {
+    # Fall through to the manual review loop below
+}
+```
+
+**Loop (runs only when auto_approve did not trigger):**
 
 Display `CHANGE_PLAN` to the user in full (include the proposed diff).
 
@@ -265,7 +315,7 @@ Capture from its output:
 - `FIXES_SKIPPED` — BOM-managed or not-approved packages skipped
 
 ### 5b — @w2-validator
-Pass pre-resolved variables: `$REPO_ROOT`, `$MANIFEST_PATH`, `$MVN_CMD`, `$GIT_BASH`, `$BUILD_TOOL`, `$TEST_CMD`, `$START_CMD_CFG`, `$SERVICE_NAME`, `$MYSQL_PORT`, `$SMOKE_URL`, `$SMOKE_TIMEOUT`, `$HTTP_TIMEOUT`, and `FIXES_APPLIED`.
+Pass pre-resolved variables: `$REPO_ROOT`, `$MANIFEST_PATH`, `$MVN_CMD`, `$GIT_BASH`, `$BUILD_TOOL`, `$TEST_CMD`, `$START_CMD_CFG`, `$SERVICE_NAME`, `$SMOKE_URL`, `$SMOKE_TIMEOUT`, `$HTTP_TIMEOUT`, and `FIXES_APPLIED`.
 
 Capture from its output:
 - `VALIDATION_RESULTS` — per-check pass/fail
@@ -276,9 +326,31 @@ Capture from its output:
 ```
 BUILD_FAILURE_ATTEMPTS++
 If BUILD_FAILURE_ATTEMPTS > MAX_BUILD_FAILURES:
-  → HUMAN INTERVENTION: "Too many build failures — escalate to engineer"
-  → Leave branch as-is
-  → Stop
+  # Gap 13 fix: offer partial-fix commit before escalating
+  Identify which entries in FIXES_APPLIED succeeded vs which caused the failure (from FAILURE_CONTEXT.Suspect).
+  $passingFixes = FIXES_APPLIED entries NOT mentioned in FAILURE_CONTEXT
+  $failingFixes = FIXES_APPLIED entries mentioned in FAILURE_CONTEXT
+
+  If $passingFixes is non-empty:
+    → Present user with partial-fix option:
+      "Build failed after 3 attempts.
+       Passing fixes: <$passingFixes>
+       Failing fixes: <$failingFixes>
+       Choose:
+         (a) commit the passing fixes and escalate the failing ones separately
+         (b) discard all changes and escalate everything to an engineer"
+
+    If user chooses (a):
+      → Restore failing packages to their original versions in pom.xml
+      → Commit only the passing fixes (see Step 8 targeted-add strategy)
+      → Post Jira comment: "Partial fix applied — <N> CVEs addressed, <M> escalated due to build failure"
+      → Stop with partial success
+
+  Else (no passing fixes at all):
+    → HUMAN INTERVENTION: "Too many build failures — escalate to engineer"
+    → Leave branch as-is
+    → Stop
+
 Else:
   ATTEMPT++
   → Loop back to Step 5a (pass updated FAILURE_CONTEXT)
@@ -320,6 +392,10 @@ If VERIFY_FIX_ATTEMPTS > MAX_VERIFY_FIXES:
   → Leave branch as-is
   → Stop
 Else:
+  # Gap 3 fix: reset BUILD_FAILURE_ATTEMPTS before re-entering the build loop.
+  # Without this, build attempts consumed in Step 5 count against the 3-attempt limit here,
+  # causing premature build escalation before VERIFY_FIX_ATTEMPTS reaches its own max.
+  BUILD_FAILURE_ATTEMPTS = 0
   → Pass ISSUES as FAILURE_CONTEXT to @w2-fixer (ATTEMPT = VERIFY_FIX_ATTEMPTS + 1)
   → Re-invoke Step 5a (@w2-fixer) → Step 5b (@w2-validator) → Step 6 (@w2-verifier)
   → Loop back to top of Step 7
@@ -351,8 +427,19 @@ Ask the user:
 - Commit the changes to the feature branch:
   ```powershell
   Set-Location $REPO_ROOT
-  $MANIFEST = $cfg.workflow2.manifest_path
-  & $GIT_BASH -c "git add $MANIFEST && git commit -m 'fix($SERVICE_NAME): address GHAS vulnerabilities [$JIRA_TICKET_ID]'"
+  # Gap 7 fix: stage only pom.xml files changed during this workflow.
+  # 'git add -u' would include any tracked file accidentally modified (e.g. by a smoke check),
+  # contaminating the PR with unrelated changes.
+  $modifiedPoms = (& $GIT_BASH -c "git diff --name-only") -split '\r?\n' |
+      Where-Object { $_ -match 'pom\.xml$' }
+  if (-not $modifiedPoms) {
+      Write-Host "WARNING: No pom.xml changes detected — nothing to commit"
+  } else {
+      Write-Host "Staging modified pom.xml files:"
+      $modifiedPoms | ForEach-Object { Write-Host "  $_" }
+      $pomList = ($modifiedPoms | ForEach-Object { """$_""" }) -join ' '
+      & $GIT_BASH -c "git add $pomList && git commit -m 'fix($SERVICE_NAME): address GHAS vulnerabilities [$JIRA_TICKET_ID]'"
+  }
   ```
 - Proceed to Step 9.
 
@@ -406,6 +493,7 @@ Present the full report produced by **@w2-reporter**, including the PR URL.
 
 - Never ask the user for repo, service name, Jira site URL, or project key — they come from config
 - Only the Jira ticket ID needs to be provided (or auto-looked up)
+- After Step 5b, if `VALIDATION_STATUS = passed` but `SMOKE_STATUS = skipped`, surface to user: "⚠️ Smoke check was skipped — application startup not verified" before Step 8 human review
 - Never revert any fix — that is @w2-validator's job to report; the orchestrator retries or escalates
 - Always pass all sub-agent outputs explicitly to each subsequent sub-agent
 - Never invoke @w2-fixer before the change plan is approved in Step 4

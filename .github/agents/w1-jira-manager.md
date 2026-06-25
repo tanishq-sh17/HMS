@@ -1,5 +1,5 @@
 ---
-description: Workflow 1 / Sub-Agent 3 — For each service, checks Jira for an existing GHAS ticket by service label. Creates one ticket per service (consolidating all CVEs) where none exists. Updates the CSV with Jira keys and statuses.
+description: Workflow 1 / Sub-Agent 3 — For each service, checks Jira for an existing active GHAS ticket. If one exists, compares its CVEs against current alerts and creates a new ticket only for net-new CVEs. If no active ticket exists, creates a fresh consolidated ticket. Updates the CSV with Jira keys and statuses.
 tools:
   - powershell
 ---
@@ -39,17 +39,26 @@ create **one consolidated ticket per service** (covering all CVEs), and update t
 
 ```
 🔄 [Jira Manager] Processing service: HMS (16 alerts)
-   → Checking Jira for existing GHAS ticket (label=HMS)...
-   → No existing ticket found — creating new ticket
-   → Running jira_ticket_manager.py create...
+   → Checking Jira for existing active GHAS ticket (label=HMS)...
+
+── Case 1: no existing active ticket ──
+   → No active ticket found — creating fresh ticket for all 16 alerts
 ✅ [Jira Manager] Ticket created: HMS-XX — "Address GHAS vulnerabilities for HMS [Critical-3, High-7, Medium-5, Low-1]"
-   → Updating CSV with Jira key HMS-XX...
+
+── Case 2: active ticket exists, new CVEs detected ──
+   → Active ticket found: HMS-14 (In Dev) — comparing CVEs...
+   → Existing ticket covers: CVE-2021-44228, CVE-2015-7501 (2 CVEs)
+   → Current alerts contain: CVE-2021-44228, CVE-2015-7501, CVE-2022-42003, CVE-2022-25647 (4 CVEs)
+   → Net-new CVEs: CVE-2022-42003, CVE-2022-25647 — creating new ticket for 2 new alerts
+✅ [Jira Manager] Ticket created: HMS-XX — "Address GHAS vulnerabilities for HMS [High-2]"
+
+── Case 3: active ticket exists, no new CVEs ──
+   → Active ticket found: HMS-14 (In Dev) — comparing CVEs...
+   → All current CVEs already covered by HMS-14 — SKIPPING
+✅ [Jira Manager] Skipped HMS (no new CVEs since HMS-14)
+
+   → Updating CSV with Jira key / status...
 ✅ [Jira Manager] CSV updated
-
-  ── or if duplicate found ──
-
-   → Existing ticket found: HMS-XX (In Progress) — SKIPPING
-✅ [Jira Manager] Skipped HMS (duplicate: HMS-XX)
 ```
 
 If any command fails, emit:
@@ -79,8 +88,31 @@ $BASE_LABEL    = ($cfg.jira.labels | Select-Object -First 1)
 $SKIP_STATUSES = $cfg.jira.skip_statuses_for_duplicate_check
 $CSV_GLOB      = Join-Path $REPO_ROOT ($cfg.csv.glob_pattern)
 
-Write-Host "Config loaded: jira=$JIRA_PROJECT  service=$SERVICE_NAME"
+Write-Host "Config loaded: jira=$JIRA_PROJECT  service=$SERVICE_NAME  skip_statuses=$($SKIP_STATUSES -join ',')"
 ```
+
+### 0b. Define Retry Helper (Gap 4 fix — handles transient Jira/GitHub 429s and network blips)
+
+Define this function once, before any API call:
+
+```powershell
+function Invoke-WithRetry {
+    param([scriptblock]$Command, [int]$MaxAttempts = 3, [int]$BaseDelaySec = 5)
+    for ($i = 1; $i -le $MaxAttempts; $i++) {
+        $output = & $Command 2>&1
+        if ($LASTEXITCODE -eq 0) { return $output }
+        if ($i -lt $MaxAttempts) {
+            $delay = $BaseDelaySec * [Math]::Pow(2, $i - 1)  # 5s, 10s, 20s
+            Write-Host "  [Retry $i/$MaxAttempts] Command failed (exit $LASTEXITCODE) — waiting ${delay}s"
+            Start-Sleep -Seconds $delay
+        }
+    }
+    Write-Host "  [FAILED after $MaxAttempts attempts] last exit: $LASTEXITCODE"
+    return $output
+}
+```
+
+---
 
 ### 1. Resolve the CSV path
 Use the path passed by @w1-sorter. If not provided, resolve the latest:
@@ -91,43 +123,115 @@ Write-Host "CSV: $CSV_PATH"
 
 ---
 
-### 2. Check Jira for an existing ticket (MANDATORY — never skip)
+### 2. Delta detection — compare existing active ticket CVEs against current alerts
 
-Run `jira_ticket_manager.py search` and capture its JSON output:
+**2a. Search for an existing active ticket (wrapped with retry — Gap 4 fix):**
 ```powershell
-& $PYTHON_CMD $JIRA_SCRIPT `
-  search --project $JIRA_PROJECT --labels "$BASE_LABEL,<SERVICE_NAME>"
+$searchOutput = Invoke-WithRetry -Command {
+    & $PYTHON_CMD $JIRA_SCRIPT `
+        search --project $JIRA_PROJECT --labels "$BASE_LABEL,<SERVICE_NAME>"
+}
+Write-Host $searchOutput
 ```
 
-**Apply status-aware duplicate logic:**
+**2b. Determine whether an active ticket exists:**
 
-```
-For each ticket returned:
-  - If ticket.status IS IN $SKIP_STATUSES → ticket is active → SKIP creation
-  - If ticket.status is NOT in $SKIP_STATUSES → ticket is closed/done → proceed to CREATE
+A ticket is *active* if its status is in `$SKIP_STATUSES`. Parse the JSON output and check:
 
-If no tickets returned at all → proceed to CREATE
+```powershell
+& $PYTHON_CMD -c "
+import json, sys
+tickets = json.loads('''$searchOutput''')
+skip = [s.lower() for s in '$($SKIP_STATUSES -join ',')'.split(',') if s]
+active = [t for t in tickets if t.get('status','').lower() in skip]
+if active:
+    print('ACTIVE_TICKET_KEY=' + active[0]['key'])
+    print('ACTIVE_TICKET_STATUS=' + active[0].get('status',''))
+    desc = active[0].get('description', '') or ''
+    print('ACTIVE_TICKET_DESC=' + desc[:2000])
+else:
+    print('ACTIVE_TICKET_KEY=NONE')
+"
 ```
 
-**Progress output:**
-```
-→ Existing ticket found: HMS-14 (Done) — not in skip-list → CREATING new ticket  # example — actual values from config/runtime
-→ Existing ticket found: HMS-20 (In Dev) — in skip-list → SKIPPING
-→ No existing ticket found → CREATING new ticket
+**2c. If `ACTIVE_TICKET_KEY = NONE` → no active ticket, skip to Step 3 with `CREATE_MODE = all`.**
+
+**2d. If an active ticket exists — run CVE delta detection:**
+
+```powershell
+& $PYTHON_CMD -c "
+import csv, glob, os, re, json, tempfile
+
+SERVICE      = '<SERVICE_NAME>'
+CSV_GLOB     = r'$CSV_GLOB'
+TICKET_DESC  = '''<ACTIVE_TICKET_DESC>'''
+
+# Extract all CVE and GHSA IDs from the existing ticket description
+existing_ids = set(re.findall(r'CVE-\d{4}-\d+', TICKET_DESC, re.IGNORECASE))
+existing_ids |= set(re.findall(r'GHSA-[a-z0-9]+-[a-z0-9]+-[a-z0-9]+', TICKET_DESC, re.IGNORECASE))
+existing_ids = {i.upper() for i in existing_ids}
+print(f'EXISTING_IDS ({len(existing_ids)}): {sorted(existing_ids)}')
+
+# Read current alerts from CSV for this service
+files = sorted(glob.glob(CSV_GLOB), key=os.path.getmtime, reverse=True)
+if not files:
+    print('ERROR: No CSV found'); exit(1)
+with open(files[0], newline='', encoding='utf-8') as f:
+    all_rows = list(csv.DictReader(f))
+
+service_rows = [r for r in all_rows if r.get('service','').strip().lower() == SERVICE.lower()]
+current_ids  = set()
+for r in service_rows:
+    if r.get('cve_id','').strip():  current_ids.add(r['cve_id'].strip().upper())
+    if r.get('ghsa_id','').strip(): current_ids.add(r['ghsa_id'].strip().upper())
+print(f'CURRENT_IDS ({len(current_ids)}): {sorted(current_ids)}')
+
+# Delta: IDs in current alerts that are NOT in the existing ticket
+new_ids = current_ids - existing_ids
+print(f'NEW_IDS ({len(new_ids)}): {sorted(new_ids)}')
+
+if not new_ids:
+    print('DELTA_RESULT=NO_NEW_CVES')
+else:
+    # Build a temp CSV containing only the new-alert rows
+    new_rows = [r for r in service_rows
+                if r.get('cve_id','').strip().upper()  in new_ids
+                or r.get('ghsa_id','').strip().upper() in new_ids]
+    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False,
+                                      newline='', encoding='utf-8')
+    fieldnames = list(all_rows[0].keys())
+    writer = csv.DictWriter(tmp, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(new_rows)
+    tmp.close()
+    print(f'DELTA_RESULT=NEW_CVES_FOUND')
+    print(f'DELTA_CSV={tmp.name}')
+    print(f'DELTA_ROW_COUNT={len(new_rows)}')
+"
 ```
 
-- **Should SKIP** → use first matching ticket's `key` as `JIRA_KEY` and set `JIRA_STATUS = SKIPPED`. Do NOT create a new ticket.
-- **Should CREATE** → proceed to Step 3.
+**Interpret the output:**
+
+| `DELTA_RESULT` | Action |
+|---|---|
+| `NO_NEW_CVES` | All current CVEs are already in the active ticket → **SKIP** (set `JIRA_KEY = <ACTIVE_TICKET_KEY>`, `JIRA_STATUS = SKIPPED`) → jump to Step 4 |
+| `NEW_CVES_FOUND` | Net-new CVEs exist → proceed to Step 3 with `CREATE_MODE = delta`, `CSV_TO_USE = <DELTA_CSV>` |
+
+If `ACTIVE_TICKET_KEY = NONE` → proceed to Step 3 with `CREATE_MODE = all`, `CSV_TO_USE = <CSV_PATH>`.
 
 ---
 
-### 3. Create the Jira ticket (only if Step 2 determined creation is needed)
+### 3. Create the Jira ticket (only when Step 2 determined creation is needed)
 
-Run `jira_ticket_manager.py create` — it reads the CSV, computes severity counts, builds the ADF description, and calls the Jira API.
-Priority, story points, table columns, and summary template are read from `ghas-workflow-config.yml` by the script automatically — do NOT pass them as flags:
+Run `jira_ticket_manager.py create` using `CSV_TO_USE` (either the original CSV for a full ticket or the delta temp CSV for new-CVEs-only). Priority, story points, table columns, and summary template are read from `ghas-workflow-config.yml` by the script automatically — do NOT pass them as flags. Wrapped with retry for transient failures (Gap 4 fix):
 ```powershell
-& $PYTHON_CMD $JIRA_SCRIPT `
-  create --project $JIRA_PROJECT --service "<SERVICE_NAME>" --csv "<CSV_PATH>"
+# CSV_TO_USE = <CSV_PATH>          when CREATE_MODE = all
+# CSV_TO_USE = <DELTA_CSV>         when CREATE_MODE = delta
+$createOutput = Invoke-WithRetry -Command {
+    & $PYTHON_CMD $JIRA_SCRIPT `
+        create --project $JIRA_PROJECT --service "<SERVICE_NAME>" --csv "<CSV_TO_USE>"
+}
+Write-Host $createOutput
 ```
 
 **Expected output:**
@@ -135,9 +239,9 @@ Priority, story points, table columns, and summary template are read from `ghas-
 {"key": "HMS-XX", "summary": "Address GHAS vulnerabilities for HMS [...]", "priority": "High"}  // example — actual value from config
 ```
 
-Parse `key` from this JSON — this is `JIRA_KEY`. Set `JIRA_STATUS = CREATED`.
+Parse `key` from `$createOutput` JSON — this is `JIRA_KEY`. Set `JIRA_STATUS = CREATED`.
 
-If the command exits non-zero → log the error, mark the service as FAILED, continue with next service.
+If all retry attempts exit non-zero → log the exact error from `$createOutput`, mark the service as FAILED, continue with next service.
 
 ---
 
@@ -197,19 +301,22 @@ Services found : X
 Total alerts   : X  (Dependabot: X, Code Scanning: X, Secret Scanning: X)
 Severity       : CRITICAL: X, HIGH: X, MEDIUM: X, LOW: X
 
-Jira results (one ticket per service):
-  CREATED : X  → [HMS-XX, ...]  # example — actual keys come from Jira
-  SKIPPED : X  → (duplicate tickets already open)
-  FAILED  : X  → (errors if any)
+Jira results:
+  CREATED (fresh)  : X  → [HMS-XX, ...]   # no prior active ticket
+  CREATED (delta)  : X  → [HMS-XX, ...]   # new CVEs found alongside existing active ticket
+  SKIPPED          : X  → [HMS-XX, ...]   # active ticket exists, all CVEs already covered
+  FAILED           : X  → (errors if any)
 
 Services with NEW tickets (for Workflow 2):
   - HMS → HMS-XX  # example — actual values come from config/runtime
 ```
 
 ## Rules
-- **One ticket per service** — never create one ticket per CVE
-- Always run Step 2 (search) BEFORE Step 3 (create) — never skip the duplicate check
-- If the search command fails → stop that service, log the real error, continue with next service
+- **Never create one ticket per CVE** — one consolidated ticket per creation event
+- **Delta logic governs creation**: if an active ticket exists (status in `$SKIP_STATUSES`), only create a new ticket when current alerts contain CVE/GHSA IDs not present in that ticket's description
+- **If no active ticket exists** (none found, or all found are closed/done) → create a fresh ticket covering all current alerts
+- Always run Step 2 (search + delta detection) before Step 3 (create) — never skip it
+- If the search command fails → log the real error, fall back to `CREATE_MODE = all`
 - If ticket creation fails → log the real failure, continue with remaining services
 - Run Step 4 (CSV update) after every service regardless of CREATED or SKIPPED status
-- Use only config-loaded Jira values for project, labels, priority, story points, and duplicate-status logic
+- Use only config-loaded Jira values for project, labels, priority, story points, and skip-status logic

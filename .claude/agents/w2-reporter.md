@@ -61,6 +61,7 @@ $JIRA_SCRIPT       = "<JIRA_SCRIPT>"
 $TRANSITION_DONE   = "<TRANSITION_DONE>"
 $TRANSITION_REVIEW = "<TRANSITION_REVIEW>"
 $jiraSiteUrl       = "<JIRA_SITE_URL>"
+$GH_CMD            = "<GH_CMD>"   # Gap 12 fix: use config-loaded gh path instead of bare 'gh'
 $REPORT_TEMP_FILE  = "$env:TEMP\$($SERVICE_NAME.ToLower())_w2_report.txt"
 Write-Host "Variables loaded: service=$SERVICE_NAME  base_branch=$BASE_BRANCH  done_transition=$TRANSITION_DONE"
 ```
@@ -83,6 +84,18 @@ Build the PR body and create the PR:
 ```powershell
 $jiraLink = "$jiraSiteUrl/browse/$JIRA_TICKET_ID"
 
+# Gap 8 fix: build the fixes table from FIXES_APPLIED (passed from @w2-fixer output) before
+# constructing $prBody. The previous code had a literal placeholder that could end up in production PRs.
+# Parse lines like: "FIXED [MAJOR]: log4j-core 2.14.1 → 2.17.2 (inline) — CVE-2021-44228"
+$FIXES_TABLE_ROWS = ($FIXES_APPLIED -split '\r?\n' |
+    Where-Object { $_ -match '^FIXED' } |
+    ForEach-Object {
+        if ($_ -match 'FIXED\s+\[(\w+)\]\s*:\s*([\w\-\.]+)\s+([^\s]+)\s+\u2192\s+([^\s]+)\s+\(([^)]+)\)\s*[—-]?\s*(.*)') {
+            "| $($Matches[2]) | $($Matches[6].Trim()) | $($Matches[1]) | $($Matches[3]) | $($Matches[4]) | $($Matches[5]) |"
+        }
+    }) -join "`n"
+if (-not $FIXES_TABLE_ROWS) { $FIXES_TABLE_ROWS = "| (no fixes applied) | | | | | |" }
+
 $prBody = @"
 ## Summary
 
@@ -92,11 +105,7 @@ Addresses GHAS vulnerabilities tracked in Jira ticket [$JIRA_TICKET_ID]($jiraLin
 
 | Package | CVE(s) | Severity | Before | After | Fix Type |
 |---------|--------|----------|--------|-------|----------|
-$(
-  # Populate from @w2-fixer changes log — one row per fix
-  # e.g.: "| log4j-core | CVE-2021-44228 | CRITICAL | 2.14.1 | 2.17.2 | inline |"
-  "<insert fixes table rows here>"
-)
+$FIXES_TABLE_ROWS
 
 ## Validation
 
@@ -119,7 +128,9 @@ $VERIFICATION_RESULT — $( if ($VERIFICATION_RESULT -eq 'passed') { 'All checks
 
 $prBody | Set-Content "$env:TEMP\pr_body.txt" -Encoding UTF8
 
-gh pr create `
+# Gap 12 fix: use $GH_CMD (config-loaded) instead of bare 'gh' so PR creation works
+# even when gh is not on PATH but is configured in YAML
+& $GH_CMD pr create `
   --repo "$REPO_OWNER/$REPO_NAME" `
   --base $BASE_BRANCH `
   --head $FEATURE_BRANCH `
