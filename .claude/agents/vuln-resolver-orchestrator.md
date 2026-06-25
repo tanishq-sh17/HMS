@@ -125,12 +125,18 @@ if ($LASTEXITCODE -ne 0 -or -not $ticketSearch) {
     Write-Host "ERROR: Cannot fetch ticket $JIRA_TICKET_ID — check ticket ID and Jira auth"
     exit 1
 }
-$ticketLabels = & $PYTHON_CMD -c "
-import json, sys
-t = json.loads('''$ticketSearch''')
+$tmpJson = [System.IO.Path]::GetTempFileName() + ".json"
+Set-Content -Path $tmpJson -Value $ticketSearch -Encoding UTF8
+$tmpPy = [System.IO.Path]::GetTempFileName() + ".py"
+@"
+import json
+with open(r'$tmpJson', encoding='utf-8') as f:
+    t = json.load(f)
 t = t[0] if isinstance(t, list) else t
 print(','.join(t.get('labels', [])))
-"
+"@ | Set-Content -Path $tmpPy -Encoding UTF8
+$ticketLabels = & $PYTHON_CMD $tmpPy
+Remove-Item $tmpPy, $tmpJson -ErrorAction SilentlyContinue
 if ($ticketLabels -notmatch [regex]::Escape($SERVICE_NAME)) {
     Write-Host "WARNING: Ticket $JIRA_TICKET_ID labels ($ticketLabels) do not include service '$SERVICE_NAME'."
     Write-Host "Proceeding, but verify this ticket is for the intended service before continuing."

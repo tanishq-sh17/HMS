@@ -29,6 +29,8 @@ create **one consolidated ticket per service** (covering all CVEs), and update t
 - For Git Bash / shell script execution, call `powershell` with the config-loaded path after Step 0: `& $GIT_BASH -c "<command>"`
 - Never say "I would run..." or "I cannot run because runCommand is unavailable" — invoke `powershell` and show actual output
 - If a command fails, show the exact error from `powershell` output — never fabricate success
+- For multi-line Python, write the code to a temp `.py` file via `Set-Content -Path $tmpPy -Encoding UTF8` with a here-string `@"..."@`, then run `& $PYTHON_CMD $tmpPy`. Never use `& $PYTHON_CMD -c "..."` for multi-line scripts — PowerShell cannot pass multi-line strings to `-c`.
+- When embedding large variable content (e.g. JSON from `$searchOutput`) into Python, first write the variable to a temp `.json` file with `Set-Content -Path $tmpJson -Value $searchOutput -Encoding UTF8`, then have Python read from that file — never embed it inline in the script.
 
 ## Input (from orchestrator)
 - `CONFIG_PATH` — path to `ghas-workflow-config.yml`
@@ -139,11 +141,15 @@ Write-Host $searchOutput
 A ticket is *active* if its status is in `$SKIP_STATUSES`. Parse the JSON output and check:
 
 ```powershell
-& $PYTHON_CMD -c "
-import json, sys
-tickets = json.loads('''$searchOutput''')
-skip = [s.lower() for s in '$($SKIP_STATUSES -join ',')'.split(',') if s]
-active = [t for t in tickets if t.get('status','').lower() in skip]
+$tmpJson = [System.IO.Path]::GetTempFileName() + ".json"
+Set-Content -Path $tmpJson -Value $searchOutput -Encoding UTF8
+$tmpPy = [System.IO.Path]::GetTempFileName() + ".py"
+@"
+import json
+SKIP = [s.strip().lower() for s in '$($SKIP_STATUSES -join ',')'.split(',') if s.strip()]
+with open(r'$tmpJson', encoding='utf-8') as f:
+    tickets = json.load(f)
+active = [t for t in tickets if t.get('status','').lower() in SKIP]
 if active:
     print('ACTIVE_TICKET_KEY=' + active[0]['key'])
     print('ACTIVE_TICKET_STATUS=' + active[0].get('status',''))
@@ -151,7 +157,9 @@ if active:
     print('ACTIVE_TICKET_DESC=' + desc[:2000])
 else:
     print('ACTIVE_TICKET_KEY=NONE')
-"
+"@ | Set-Content -Path $tmpPy -Encoding UTF8
+& $PYTHON_CMD $tmpPy
+Remove-Item $tmpPy, $tmpJson -ErrorAction SilentlyContinue
 ```
 
 **2c. If `ACTIVE_TICKET_KEY = NONE` → no active ticket, skip to Step 3 with `CREATE_MODE = all`.**
@@ -159,12 +167,18 @@ else:
 **2d. If an active ticket exists — run CVE delta detection:**
 
 ```powershell
-& $PYTHON_CMD -c "
+# Write ticket description to a temp file to avoid embedding arbitrary text in a Python string
+$tmpDesc = [System.IO.Path]::GetTempFileName() + ".txt"
+Set-Content -Path $tmpDesc -Value "<ACTIVE_TICKET_DESC>" -Encoding UTF8
+$tmpPy = [System.IO.Path]::GetTempFileName() + ".py"
+@"
 import csv, glob, os, re, json, tempfile
 
-SERVICE      = '<SERVICE_NAME>'
-CSV_GLOB     = r'$CSV_GLOB'
-TICKET_DESC  = '''<ACTIVE_TICKET_DESC>'''
+SERVICE  = '<SERVICE_NAME>'
+CSV_GLOB = r'$CSV_GLOB'
+
+with open(r'$tmpDesc', encoding='utf-8') as f:
+    TICKET_DESC = f.read()
 
 # Extract all CVE and GHSA IDs from the existing ticket description
 existing_ids = set(re.findall(r'CVE-\d{4}-\d+', TICKET_DESC, re.IGNORECASE))
@@ -207,7 +221,9 @@ else:
     print(f'DELTA_RESULT=NEW_CVES_FOUND')
     print(f'DELTA_CSV={tmp.name}')
     print(f'DELTA_ROW_COUNT={len(new_rows)}')
-"
+"@ | Set-Content -Path $tmpPy -Encoding UTF8
+& $PYTHON_CMD $tmpPy
+Remove-Item $tmpPy, $tmpDesc -ErrorAction SilentlyContinue
 ```
 
 **Interpret the output:**
@@ -249,19 +265,20 @@ If all retry attempts exit non-zero → log the exact error from `$createOutput`
 
 Run the following once per service (replace `<SERVICE_NAME>`, `<JIRA_KEY>`, `<JIRA_STATUS>`):
 ```powershell
-& $PYTHON_CMD -c "
+$tmpPy = [System.IO.Path]::GetTempFileName() + ".py"
+@"
 import csv, glob, os
-
-SERVICE = '$SERVICE_NAME'
-files = sorted(glob.glob(r'$CSV_GLOB'), key=os.path.getmtime, reverse=True)
-CSV_PATH = files[0] if files else None
-if not CSV_PATH:
-    print('ERROR: No github_alerts_*.csv found')
-    exit(1)
 
 SERVICE     = '<SERVICE_NAME>'
 JIRA_KEY    = '<JIRA_KEY>'
 JIRA_STATUS = '<JIRA_STATUS>'
+CSV_GLOB    = r'$CSV_GLOB'
+
+files = sorted(glob.glob(CSV_GLOB), key=os.path.getmtime, reverse=True)
+CSV_PATH = files[0] if files else None
+if not CSV_PATH:
+    print('ERROR: No github_alerts_*.csv found')
+    exit(1)
 
 with open(CSV_PATH, newline='', encoding='utf-8') as f:
     rows = list(csv.DictReader(f))
@@ -285,7 +302,9 @@ with open(CSV_PATH, 'w', newline='', encoding='utf-8') as f:
     writer.writerows(rows)
 
 print('Updated CSV for ' + SERVICE + ' -> ' + JIRA_KEY + ' (' + JIRA_STATUS + ')')
-"
+"@ | Set-Content -Path $tmpPy -Encoding UTF8
+& $PYTHON_CMD $tmpPy
+Remove-Item $tmpPy -ErrorAction SilentlyContinue
 ```
 
 Confirm the `print(...)` line appears in actual output before proceeding.

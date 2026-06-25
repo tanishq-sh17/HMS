@@ -28,6 +28,7 @@ Your job is to read that CSV, group the alerts by service, and pass the structur
 - For Git Bash / shell script execution, call `powershell` with the config-loaded path after Step 0: `& $GIT_BASH -c "<command>"`
 - Never say "I would run..." or "I cannot run because runCommand is unavailable" — invoke `powershell` and show actual output
 - If a command fails, show the exact error from `powershell` output — never fabricate success
+- For multi-line Python, write the code to a temp `.py` file via `Set-Content -Path $tmpPy -Encoding UTF8` with a here-string `@"..."@`, then run `& $PYTHON_CMD $tmpPy`. Never use `& $PYTHON_CMD -c "..."` for multi-line scripts — PowerShell cannot pass multi-line strings to `-c`.
 
 ## Input (from orchestrator)
 - `CONFIG_PATH` — path to `ghas-workflow-config.yml`
@@ -77,11 +78,13 @@ Get-ChildItem $CSV_GLOB | Sort-Object LastWriteTime -Descending | Select-Object 
 Run the following inline Python to extract, group, and compute compliance counts:
 
 ```powershell
-& $PYTHON_CMD -c "
+$tmpPy = [System.IO.Path]::GetTempFileName() + ".py"
+@"
 import csv, glob, os
 
 SERVICE = '$SERVICE_NAME'
-files = sorted(glob.glob(r'$CSV_GLOB'), key=os.path.getmtime, reverse=True)
+CSV_GLOB = r'$CSV_GLOB'
+files = sorted(glob.glob(CSV_GLOB), key=os.path.getmtime, reverse=True)
 CSV_PATH = files[0] if files else None
 if not CSV_PATH:
     print('ERROR: No github_alerts_*.csv found')
@@ -126,7 +129,11 @@ for svc, alerts in groups.items():
     print(f'COMPLIANCE: {svc} | {" | ".join(comp_parts)}')
 
 print('SERVICE_NAMES:', list(groups.keys()))
-"
+total = sum(len(v) for v in groups.values())
+print(f'TOTAL_ALERTS: {total}')
+"@ | Set-Content -Path $tmpPy -Encoding UTF8
+& $PYTHON_CMD $tmpPy
+Remove-Item $tmpPy -ErrorAction SilentlyContinue
 ```
 
 ### 3. Build grouped structure for handoff

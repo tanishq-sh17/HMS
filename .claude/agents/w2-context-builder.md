@@ -28,6 +28,7 @@ You produce a complete context map for @w2-fixer.
 - For Git Bash / shell script execution, call `powershell` with the config-loaded path after Step 0: `& $GIT_BASH -c "<command>"`
 - Never say "I would run..." or "I cannot run because runCommand is unavailable" — invoke `powershell` and show actual output
 - If a command fails, show the exact error from `powershell` output — never fabricate success
+- For multi-line Python, write the code to a temp `.py` file via `Set-Content -Path $tmpPy -Encoding UTF8` with a here-string `@"..."@`, then run `& $PYTHON_CMD $tmpPy`. Never use `& $PYTHON_CMD -c "..."` for multi-line scripts — PowerShell cannot pass multi-line strings to `-c`.
 
 ## Input (from orchestrator)
 - `CONFIG_PATH` — path to `ghas-workflow-config.yml` (passed by orchestrator)
@@ -100,10 +101,13 @@ Write-Host "CSV: $csv"
 
 Then run the Python grouping command:
 ```powershell
-& $PYTHON_CMD -c "
+$tmpPy = [System.IO.Path]::GetTempFileName() + ".py"
+@"
 import csv, glob, os
 
-files = sorted(glob.glob(r'$CSV_GLOB'), key=os.path.getmtime, reverse=True)
+CSV_GLOB = r'$CSV_GLOB'
+SERVICE  = '$SERVICE_NAME'
+files = sorted(glob.glob(CSV_GLOB), key=os.path.getmtime, reverse=True)
 if not files:
     print('[WARN] No github_alerts_*.csv found — skipping CSV enrichment')
     exit(0)
@@ -111,7 +115,6 @@ if not files:
 CSV_PATH = files[0]
 print(f'[INFO] Reading CSV: {CSV_PATH}')
 
-SERVICE = '$SERVICE_NAME'
 with open(CSV_PATH, newline='', encoding='utf-8') as f:
     rows = list(csv.DictReader(f))
 
@@ -140,7 +143,9 @@ for r in cs_rows:
 print(f'Secret Scanning alerts: {len(ss_rows)}')
 for r in ss_rows:
     print(f'  {r["title"]} | {r["url"]}')
-"
+"@ | Set-Content -Path $tmpPy -Encoding UTF8
+& $PYTHON_CMD $tmpPy
+Remove-Item $tmpPy -ErrorAction SilentlyContinue
 ```
 
 If the CSV is not found → log `[WARN] No CSV — continuing with gh CLI data only` and proceed.

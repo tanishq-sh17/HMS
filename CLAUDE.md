@@ -223,6 +223,8 @@ Steps run in order; any failure stops the workflow.
 
 **CSV columns (0-indexed):** `service` | `type` | `ghsa_id` | `cve_id` | `title` | `severity` | `created` | `due` | `url` | `Application` | `nonCompliant` | `ageDays` | **`jira_key`** | **`jira_status`**
 
+**Jira ticket table columns** (configured via `jira.ticket_table_columns` in `ghas-workflow-config.yml`): The `nonCompliant` column renders as **"Compliance Status"** in the ticket — CSV value `0` → "Compliant" (green), `1` → "Non-Compliant" (red, bold). Raw numbers are never shown.
+
 ### Workflow 2 — Vulnerability Resolver
 
 Only input needed: **Jira ticket ID** (e.g. `HMS-16`); everything else is fixed config. Four retry counters with human escalation (max 3 attempts each).

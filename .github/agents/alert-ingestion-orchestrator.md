@@ -204,27 +204,35 @@ PYTHON_CMD = $PYTHON_CMD
 
 ## Step: Group alerts by service
 Run via powershell:
-  & $PYTHON_CMD -c "
-  import csv, glob, os
-  SERVICE = '$SERVICE_NAME'
-  files = sorted(glob.glob(r'$CSV_GLOB'), key=os.path.getmtime, reverse=True)
-  CSV_PATH = files[0]
-  with open(CSV_PATH, newline='', encoding='utf-8') as f:
-      rows = list(csv.DictReader(f))
-  groups = {}
-  for row in rows:
-      svc = row['service']
-      if svc not in groups: groups[svc] = []
-      groups[svc].append(row)
-  print(f'CONFIG_SERVICE: {SERVICE}')
-  for svc, alerts in groups.items():
-      counts = {}
-      for a in alerts:
-          sev = (a['severity'] or '').upper()
-          counts[sev] = counts.get(sev, 0) + 1
-      print(f'SERVICE: {svc} | TOTAL: {len(alerts)} | {counts}')
-  print('SERVICE_NAMES:', list(groups.keys()))
-  "
+  $tmpPy = [System.IO.Path]::GetTempFileName() + ".py"
+  @"
+import csv, glob, os
+SERVICE  = '$SERVICE_NAME'
+CSV_GLOB = r'$CSV_GLOB'
+files = sorted(glob.glob(CSV_GLOB), key=os.path.getmtime, reverse=True)
+CSV_PATH = files[0] if files else None
+if not CSV_PATH:
+    print('ERROR: No github_alerts_*.csv found'); exit(1)
+with open(CSV_PATH, newline='', encoding='utf-8') as f:
+    rows = list(csv.DictReader(f))
+groups = {}
+for row in rows:
+    svc = row['service']
+    if svc not in groups: groups[svc] = []
+    groups[svc].append(row)
+print(f'CONFIG_SERVICE: {SERVICE}')
+for svc, alerts in groups.items():
+    counts = {}
+    for a in alerts:
+        sev = (a['severity'] or '').upper()
+        counts[sev] = counts.get(sev, 0) + 1
+    print(f'SERVICE: {svc} | TOTAL: {len(alerts)} | {counts}')
+print('SERVICE_NAMES:', list(groups.keys()))
+total = sum(len(v) for v in groups.values())
+print(f'TOTAL_ALERTS: {total}')
+"@ | Set-Content -Path $tmpPy -Encoding UTF8
+  & $PYTHON_CMD $tmpPy
+  Remove-Item $tmpPy -ErrorAction SilentlyContinue
 
 If output is empty → STOP with error "No services found in CSV".
 
@@ -287,29 +295,34 @@ Parse JIRA_KEY from JSON output. Set JIRA_STATUS = CREATED.
 If command fails → log exact error, continue to next service.
 
 ### C. Update CSV
-  & $PYTHON_CMD -c "
-  import csv, glob, os
-  SERVICE = '$SERVICE_NAME'
-  files = sorted(glob.glob(r'$CSV_GLOB'), key=os.path.getmtime, reverse=True)
-  CSV_PATH = files[0]
-  SERVICE = '<SERVICE>'
-  JIRA_KEY = '<JIRA_KEY>'
-  JIRA_STATUS = '<JIRA_STATUS>'
-  with open(CSV_PATH, newline='', encoding='utf-8') as f:
-      rows = list(csv.DictReader(f))
-  fieldnames = list(rows[0].keys())
-  for col in ('jira_key', 'jira_status'):
-      if col not in fieldnames: fieldnames.append(col)
-  for row in rows:
-      if row.get('service', '').strip().lower() == SERVICE.strip().lower():
-          row['jira_key'] = JIRA_KEY; row['jira_status'] = JIRA_STATUS
-      else:
-          row.setdefault('jira_key', ''); row.setdefault('jira_status', '')
-  with open(CSV_PATH, 'w', newline='', encoding='utf-8') as f:
-      writer = csv.DictWriter(f, fieldnames=fieldnames)
-      writer.writeheader(); writer.writerows(rows)
-  print('Updated CSV for ' + SERVICE + ' -> ' + JIRA_KEY + ' (' + JIRA_STATUS + ')')
-  "
+  $tmpPy = [System.IO.Path]::GetTempFileName() + ".py"
+  @"
+import csv, glob, os
+SERVICE     = '<SERVICE>'
+JIRA_KEY    = '<JIRA_KEY>'
+JIRA_STATUS = '<JIRA_STATUS>'
+CSV_GLOB    = r'$CSV_GLOB'
+files = sorted(glob.glob(CSV_GLOB), key=os.path.getmtime, reverse=True)
+CSV_PATH = files[0] if files else None
+if not CSV_PATH:
+    print('ERROR: No github_alerts_*.csv found'); exit(1)
+with open(CSV_PATH, newline='', encoding='utf-8') as f:
+    rows = list(csv.DictReader(f))
+fieldnames = list(rows[0].keys())
+for col in ('jira_key', 'jira_status'):
+    if col not in fieldnames: fieldnames.append(col)
+for row in rows:
+    if row.get('service', '').strip().lower() == SERVICE.strip().lower():
+        row['jira_key'] = JIRA_KEY; row['jira_status'] = JIRA_STATUS
+    else:
+        row.setdefault('jira_key', ''); row.setdefault('jira_status', '')
+with open(CSV_PATH, 'w', newline='', encoding='utf-8') as f:
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    writer.writeheader(); writer.writerows(rows)
+print('Updated CSV for ' + SERVICE + ' -> ' + JIRA_KEY + ' (' + JIRA_STATUS + ')')
+"@ | Set-Content -Path $tmpPy -Encoding UTF8
+  & $PYTHON_CMD $tmpPy
+  Remove-Item $tmpPy -ErrorAction SilentlyContinue
 
 ## Output (required — orchestrator parses this)
 End your response with exactly:
@@ -339,14 +352,20 @@ foreach ($svc in $ZERO_ALERT_SVCS) {
     Write-Host $searchOut
 
     # Parse tickets whose status is in $SKIP_STATUSES_STR (still open)
-    $openKeys = & $PYTHON_CMD -c "
-import json, sys
-tickets = json.loads('''$searchOut''')
-skip = [s.lower() for s in '$SKIP_STATUSES_STR'.split(',') if s]
+    $tmpJson = [System.IO.Path]::GetTempFileName() + ".json"
+    Set-Content -Path $tmpJson -Value $searchOut -Encoding UTF8
+    $tmpPy = [System.IO.Path]::GetTempFileName() + ".py"
+    @"
+import json
+SKIP = [s.strip().lower() for s in '$SKIP_STATUSES_STR'.split(',') if s.strip()]
+with open(r'$tmpJson', encoding='utf-8') as f:
+    tickets = json.load(f)
 for t in tickets:
-    if t.get('status','').lower() in skip:
+    if t.get('status','').lower() in SKIP:
         print(t['key'])
-"
+"@ | Set-Content -Path $tmpPy -Encoding UTF8
+    $openKeys = & $PYTHON_CMD $tmpPy
+    Remove-Item $tmpPy, $tmpJson -ErrorAction SilentlyContinue
     foreach ($key in ($openKeys -split '\r?\n' | Where-Object { $_ -ne '' })) {
         Write-Host "Transitioning $key to Done — all alerts resolved on GitHub"
         & $PYTHON_CMD $JIRA_SCRIPT transition --ticket $key --name "Done"

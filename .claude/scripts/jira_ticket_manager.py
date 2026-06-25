@@ -332,7 +332,7 @@ def build_adf_description(service_name, grouped_alerts):
         "created":      "Created",
         "due":          "Due",
         "ageDays":      "Age (days)",
-        "nonCompliant": "Non-Compliant",
+        "nonCompliant": "Compliance Status",
         "url":          "URL",
     }
     active_cols = [c for c in include_cols if c in COL_MAP]
@@ -350,9 +350,19 @@ def build_adf_description(service_name, grouped_alerts):
             ])
             rows = [header]
             for a in bucket:
-                rows.append(_table_row([
-                    _table_cell(str(a.get(c) or "—")) for c in active_cols
-                ]))
+                cells = []
+                for c in active_cols:
+                    if c == "nonCompliant":
+                        is_non = str(a.get("nonCompliant", "0")).strip() == "1"
+                        cells.append(_table_cell(
+                            "Non-Compliant" if is_non else "Compliant",
+                            bg="#FFEBE6" if is_non else "#E3FCEF",
+                            bold=is_non,
+                            text_color="#BF2600" if is_non else "#006644",
+                        ))
+                    else:
+                        cells.append(_table_cell(str(a.get(c) or "—")))
+                rows.append(_table_row(cells))
             content.append({
                 "type": "table",
                 "attrs": {"isNumberColumnEnabled": False, "layout": "default"},

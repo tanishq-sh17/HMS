@@ -56,7 +56,7 @@ jira:
 
   assignee: null                    # Jira accountId string, or null for unassigned
   parent_jira: null                 # Parent epic key (e.g. HMS-5), or null
-  story_points: 3                    # Story points for new tickets
+  story_points: null                 # Story points for new tickets (set to null if field not on screen)
   team: null                        # Team name, or null to leave blank
   priority: High                    # Ticket priority — set by business, not mapped per severity
   issue_type: Bug                   # Jira issue type (Bug / Task / Story / Security Finding)

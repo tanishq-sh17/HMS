@@ -263,7 +263,7 @@ Key config sections:
 | `dependency_groups` | Sibling version consistency rules (`jjwt-*`, `log4j-*`, `jackson-*`) |
 | `scripts` | Relative paths to `jira_ticket_manager.py`, `fetch_alerts.sh`, `validate_config.py` |
 
-**Config-driven Jira ticket columns**: Set `jira.ticket_table_columns` to any subset of `[ghsa_id, cve_id, title, severity, created, due, ageDays, nonCompliant, url]`. Changes take effect on the next ticket creation — no script edits required.
+**Config-driven Jira ticket columns**: Set `jira.ticket_table_columns` to any subset of `[ghsa_id, cve_id, title, severity, created, due, ageDays, nonCompliant, url]`. Changes take effect on the next ticket creation — no script edits required. The `nonCompliant` column renders as **"Compliance Status"** in the ticket — CSV value `0` → "Compliant" (green), `1` → "Non-Compliant" (red, bold). Raw numbers are never shown.
 
 ### Intentionally Vulnerable Dependencies
 
