@@ -1,68 +1,65 @@
 ---
-description: Workflow 2 / Sub-Agent 4 — Creates a GitHub PR for the feature branch, compiles a comprehensive end-to-end report, posts the report as a Jira comment, and transitions the ticket to Done/In Review based on outcome.
+description: Workflow 2 / Sub-Agent 6 — Creates a GitHub PR for the feature branch, compiles a comprehensive end-to-end report, posts the report as a Jira comment, and transitions the ticket to Done/In Review based on outcome. All Jira operations (comment, transition) use jira_ticket_manager.py — no MCP.
+model: claude-sonnet-4-6
 tools:
   - powershell
 ---
 
-# W2 Sub-Agent 4 — Reporter
+# W2 Sub-Agent 6 — Reporter
 
-You are the final sub-agent in Workflow 2.
-Your jobs in order:
-1. Create a GitHub Pull Request for the feature branch
-2. Compile a full end-to-end report
-3. Post the report as a comment on the Jira ticket
-4. Transition the Jira ticket based on outcome
+You: (1) create a GitHub PR, (2) compile the end-to-end report, (3) post it as a Jira comment, (4) transition the ticket, (5) switch back to main, (6) write the per-run fix report.
 
-## ⚠️ Execution Rules — NO SIMULATION
+**⚠️ Use `powershell` for ALL commands. Never simulate results. Show exact error output on failure.**
 
-**You MUST run every command and show real output. Never simulate, narrate, or hallucinate results.**
-
-- Do NOT say "I would post a comment..." — run the Python command and show real output
-- Do NOT invent Jira comment IDs or transition results — read them from actual command output
-- Do NOT skip the transition step — run it even if the comment step failed
-- Every Jira comment ID and transition status MUST come from actual command output
-
-## ⚠️ Tool Execution — Use powershell for ALL Commands
-
-**You have access to a `powershell` tool. Use it to run every command in this document.**
-
-- The `runCommand` tool does NOT exist in this environment — never block, stop, or report it as unavailable
-- Use the `powershell` tool for all PowerShell commands, Python scripts, and `mvn` commands
-- For Git Bash / shell script execution, call `powershell` with the config-loaded path after Step 0: `& $GIT_BASH -c "<command>"`
-- Never say "I would run..." or "I cannot run because runCommand is unavailable" — invoke `powershell` and show actual output
-- If a command fails, show the exact error from `powershell` output — never fabricate success
-
-## Input (collect from previous sub-agents)
+## Input
 
 | Source | Data |
-|--------|------|
-| `CONFIG_PATH` | Path to config — load in Step 0 |
-| @w2-context-builder | Alerts scanned, dependency classifications, sibling group audit, CSV enrichment |
-| Orchestrator | `FEATURE_BRANCH` — the git branch where fixes were applied |
-| Orchestrator | `JIRA_TICKET_ID` — e.g. `HMS-16` |
-| @w2-fixer | Fixes attempted, fix types used, skipped (BOM-managed) |
-| @w2-validator | Validation results per fix, flagged concerns, VALIDATION_STATUS |
-| @w2-verifier | `VERIFICATION_RESULT` (passed / issues_found), ISSUES list, COVERAGE_SUMMARY |
+|---|---|
+| `CONFIG_PATH` | Load static vars in Step 0 |
+| @w2-context-builder | `REPORT_CONTEXT_FILE` |
+| Orchestrator | `FEATURE_BRANCH`, `JIRA_TICKET_ID`, `FIX_REPORT_PATH` |
+| Orchestrator | `GATE4_DECISION`, `GATE4_FEEDBACK`, `GATE8_DECISION`, `GATE8_REVIEW_COMMENTS` |
+| Orchestrator | `PLAN_REVISION_COUNT`, `BUILD_FAILURE_COUNT`, `VERIFY_FIX_COUNT`, `REVIEW_FIX_COUNT` |
+| Orchestrator | `BUILD_FAILURE_DETAILS`, `VERIFY_ISSUES_DETAIL` |
+| @w2-fixer | `FIXES_APPLIED`, `FIXES_SKIPPED` |
+| @w2-validator | `VALIDATION_RESULTS`, `VALIDATION_STATUS` |
+| @w2-verifier | `VERIFICATION_RESULT`, `ISSUES`, `COVERAGE_SUMMARY` |
 
 ---
 
 ## Step 0 — Load Config
 
 ```powershell
-# Variables pre-loaded by orchestrator — no YAML reload needed
-$SERVICE_NAME      = "<SERVICE_NAME>"
-$GIT_BASH          = "<GIT_BASH>"
-$PYTHON_CMD        = "<PYTHON_CMD>"
-$REPO_OWNER        = "<REPO_OWNER>"
-$REPO_NAME         = "<REPO_NAME>"
-$REPO_ROOT         = "<REPO_ROOT>"
-$BASE_BRANCH       = "<BRANCH_BASE>"
-$JIRA_SCRIPT       = "<JIRA_SCRIPT>"
-$TRANSITION_DONE   = "<TRANSITION_DONE>"
-$TRANSITION_REVIEW = "<TRANSITION_REVIEW>"
-$jiraSiteUrl       = "<JIRA_SITE_URL>"
-$GH_CMD            = "<GH_CMD>"   # Gap 12 fix: use config-loaded gh path instead of bare 'gh'
-$REPORT_TEMP_FILE  = "$env:TEMP\$($SERVICE_NAME.ToLower())_w2_report.txt"
+$CONFIG_PATH   = "<CONFIG_PATH>"
+$cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
+$cfg = $cfgJson | ConvertFrom-Json
+
+$SERVICE_NAME      = $cfg.environment.service_name
+$GIT_BASH          = $cfg.tools.git_bash
+$REPO_OWNER        = $cfg.environment.repo_owner
+$REPO_NAME         = $cfg.environment.repo_name
+$REPO_ROOT         = $cfg.environment.repo_root
+$BASE_BRANCH       = $cfg.branch.base_branch
+$TRANSITION_DONE   = $cfg.jira.transition_done
+$TRANSITION_REVIEW = $cfg.jira.transition_in_review
+$PYTHON_CMD        = $cfg.tools.python
+$JIRA_SCRIPT       = Join-Path $REPO_ROOT ($cfg.scripts.jira_ticket_manager -replace '/', '\')
+$jiraSiteUrl       = $cfg.jira.site_url
+$GH_CMD            = $cfg.tools.gh
+$FIX_REPORT_PATH          = "<FIX_REPORT_PATH>"
+$GATE4_DECISION           = "<GATE4_DECISION>"
+$GATE4_FEEDBACK           = "<GATE4_FEEDBACK>"
+$GATE8_DECISION           = "<GATE8_DECISION>"
+$GATE8_REVIEW_COMMENTS    = "<GATE8_REVIEW_COMMENTS>"
+$PLAN_REVISION_COUNT      = "<PLAN_REVISION_COUNT>"
+$BUILD_FAILURE_COUNT      = "<BUILD_FAILURE_COUNT>"
+$VERIFY_FIX_COUNT         = "<VERIFY_FIX_COUNT>"
+$REVIEW_FIX_COUNT         = "<REVIEW_FIX_COUNT>"
+$BUILD_FAILURE_DETAILS    = "<BUILD_FAILURE_DETAILS>"
+$VERIFY_ISSUES_DETAIL     = "<VERIFY_ISSUES_DETAIL>"
+
+$REPORT_CONTEXT = Get-Content -Path "<REPORT_CONTEXT_FILE>" -Raw -Encoding UTF8
+
 Write-Host "Variables loaded: service=$SERVICE_NAME  base_branch=$BASE_BRANCH  done_transition=$TRANSITION_DONE"
 ```
 
@@ -70,23 +67,14 @@ Write-Host "Variables loaded: service=$SERVICE_NAME  base_branch=$BASE_BRANCH  d
 
 ## Step 1 — Create GitHub Pull Request
 
-Push the feature branch to origin and open a PR:
-
 ```powershell
 Set-Location $REPO_ROOT
-
-# Push branch to origin
 & $GIT_BASH -c "git push origin $FEATURE_BRANCH"
 ```
-
-Build the PR body and create the PR:
 
 ```powershell
 $jiraLink = "$jiraSiteUrl/browse/$JIRA_TICKET_ID"
 
-# Gap 8 fix: build the fixes table from FIXES_APPLIED (passed from @w2-fixer output) before
-# constructing $prBody. The previous code had a literal placeholder that could end up in production PRs.
-# Parse lines like: "FIXED [MAJOR]: log4j-core 2.14.1 → 2.17.2 (inline) — CVE-2021-44228"
 $FIXES_TABLE_ROWS = ($FIXES_APPLIED -split '\r?\n' |
     Where-Object { $_ -match '^FIXED' } |
     ForEach-Object {
@@ -128,8 +116,6 @@ $VERIFICATION_RESULT — $( if ($VERIFICATION_RESULT -eq 'passed') { 'All checks
 
 $prBody | Set-Content "$env:TEMP\pr_body.txt" -Encoding UTF8
 
-# Gap 12 fix: use $GH_CMD (config-loaded) instead of bare 'gh' so PR creation works
-# even when gh is not on PATH but is configured in YAML
 & $GH_CMD pr create `
   --repo "$REPO_OWNER/$REPO_NAME" `
   --base $BASE_BRANCH `
@@ -138,19 +124,13 @@ $prBody | Set-Content "$env:TEMP\pr_body.txt" -Encoding UTF8
   --body-file "$env:TEMP\pr_body.txt"
 ```
 
-Capture the PR URL from the output (e.g. `https://github.com/owner/repo/pull/42`).
-Store it as `$PR_URL`.
-
-If `gh pr create` exits non-zero:
-- Log the error
-- Set `$PR_URL = "(PR creation failed)"`
-- Continue to Step 2 — **do not stop the workflow**
+Capture PR URL as `$PR_URL`. If `gh pr create` fails → log error, set `$PR_URL = "(PR creation failed)"`, continue.
 
 ---
 
 ## Step 2 — Compile the Report
 
-Populate every field below with **real data from the sub-agents**. Do not leave any field as a placeholder.
+Populate every field with **real data**. No placeholders.
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗
@@ -165,92 +145,51 @@ Populate every field below with **real data from the sub-agents**. Do not leave 
 ╚══════════════════════════════════════════════════════════════════╝
 
 ────────────────────────────────────────────────────────────────────
-📋 STEP 1 — CONTEXT (w2-context-builder)
+📋 CONTEXT (w2-context-builder)
 ────────────────────────────────────────────────────────────────────
-Open Dependabot alerts : X  (CRITICAL: X | HIGH: X | MEDIUM: X | LOW: X)
-Overdue (past SLA)     : X
-
 Dependency classifications:
-  Inline versions       : X packages
-  Property-backed       : X packages
-  BOM-managed (skipped) : X packages
+  Inline versions / Property-backed / BOM-managed (skipped) : X / X / X
 
 Sibling group audit:
-  jjwt-*    : ✅ consistent / ⚠️ inconsistent (details)
-  log4j-*   : ✅ consistent / ⚠️ inconsistent (details)
-  jackson-* : ✅ consistent / ⚠️ inconsistent (details)
-
-Code Scanning alerts   : X  (CRITICAL: X | HIGH: X | MEDIUM: X | LOW: X)
-  (list each: [SEVERITY] rule title | url)
-
-Secret Scanning alerts : X
-  (list each: title | url)
+  jjwt-* / log4j-* / jackson-* : Consistent ✅ / Pre-existing mismatch ⚠️
 
 ────────────────────────────────────────────────────────────────────
-🔧 STEP 2 — FIXES APPLIED (w2-fixer)
+🔧 FIXES APPLIED (w2-fixer)
 ────────────────────────────────────────────────────────────────────
 | Package | CVE | Severity | Upgrade | Before | After | Fix Type |
 |---------|-----|----------|---------|--------|-------|----------|
-| ...     | ... | ...      | MINOR/MAJOR | ...    | ...   | ...      |
 
-Skipped — BOM-managed (no version to patch):
-| Package | Reason |
-|---------|--------|
-| ...     | ...    |
+Skipped — BOM-managed: <list or "none">
 
 ────────────────────────────────────────────────────────────────────
-🧪 STEP 3 — VALIDATION (w2-validator)
+🧪 VALIDATION (w2-validator)
 ────────────────────────────────────────────────────────────────────
-| Check                 | Result |
-|-----------------------|--------|
-| dependency:tree       | ✅/❌  |
-| compile               | ✅/❌  |
-| test                  | ✅/❌  |
-| smoke check           | ✅/❌  |
-
-Flagged concerns:
-| Package / Area | Issue |
-|----------------|-------|
-| ...            | ...   |
+| Check           | Result |
+|-----------------|--------|
+| dependency:tree | ✅/❌  |
+| compile         | ✅/❌  |
+| test            | ✅/❌  |
+| smoke check     | ✅/❌  |
 
 ────────────────────────────────────────────────────────────────────
-🔍 STEP 4 — VERIFICATION (w2-verifier)
+🔍 VERIFICATION (w2-verifier)
 ────────────────────────────────────────────────────────────────────
 VERIFICATION_RESULT: <passed | issues_found>
 
-Checks:
-  Jira cross-check        : ✅/⚠️/❌
-  CVE manifest validation : ✅/❌  (X/X packages show safe version)
-  Regression check        : ✅/❌
-  Test coverage           : ✅/❌/⚠️
-  Acceptance criteria     : ✅/❌
+  Jira cross-check / CVE manifest / Regression / Coverage / Acceptance : ✅/⚠️/❌
 
-Coverage summary:
-  Tests run : X
-  Failures  : X
-  Errors    : X
-  Coverage  : X% / N/A
-
-────────────────────────────────────────────────────────────────────
-⚠️  FLAGGED FOR HUMAN REVIEW
-────────────────────────────────────────────────────────────────────
-| Package | Issue | Recommended Action |
-|---------|-------|--------------------|
-| ...     | ...   | ...                |
+Coverage: Tests run: X  |  Failures: X  |  Errors: X  |  Coverage: X% / N/A
 
 ────────────────────────────────────────────────────────────────────
 📊 SUMMARY
 ────────────────────────────────────────────────────────────────────
-  Pull Request                : <PR_URL>
-  Feature branch              : <FEATURE_BRANCH>
-  Dependabot alerts scanned   : X
-  Fixes successfully applied  : X
-  Flagged for human review    : X
-  Skipped (BOM-managed)       : X
-  Verification result         : <passed | issues_found>
-  Code Scanning alerts        : X (not auto-fixed — require manual code changes)
-  Secret Scanning alerts      : X (not auto-fixed — require secret rotation)
-  pom.xml final state         : ✅ compiles and tests pass / ⚠️ partial fixes only
+  Pull Request              : <PR_URL>
+  Fixes applied / Skipped   : X / X (BOM-managed)
+  Flagged for human review  : X
+  Verification result       : <passed | issues_found>
+  Code Scanning alerts      : X (not auto-fixed — require manual code changes)
+  Secret Scanning alerts    : X (not auto-fixed — require secret rotation)
+  pom.xml final state       : ✅ compiles and tests pass / ⚠️ partial fixes only
 ────────────────────────────────────────────────────────────────────
 ```
 
@@ -258,74 +197,34 @@ Coverage summary:
 
 ## Step 3 — Post Report as Jira Comment
 
-Write the compiled report to a temp file, then call the Python script:
-
 ```powershell
-# Write the report to a temp file
-$reportFile = $REPORT_TEMP_FILE
-@"
-<paste the full report text from Step 2 here>
-"@ | Set-Content $reportFile -Encoding UTF8
-
-# Post as Jira comment
-& $PYTHON_CMD $JIRA_SCRIPT `
-  comment --ticket <JIRA_TICKET_ID> --body-file "$reportFile"
+$tmpComment = [System.IO.Path]::GetTempFileName() + ".txt"
+Set-Content -Path $tmpComment -Value $REPORT_BODY -Encoding UTF8
+& $PYTHON_CMD $JIRA_SCRIPT comment --ticket $JIRA_TICKET_ID --body-file $tmpComment
+Remove-Item $tmpComment -ErrorAction SilentlyContinue
+if ($LASTEXITCODE -ne 0) { Write-Host "⚠️ Jira comment post failed. Transition will still be attempted." }
 ```
-
-**Expected output:**
-```json
-{"comment_id": "XXXXXX", "ticket": "HMS-XX", "status": "posted"}  // example — actual values come from Jira
-```
-
-If the command exits non-zero:
-- Log the error
-- Continue to Step 4 — **always attempt the transition even if the comment failed**
-- Include in final output: `⚠️ Jira comment post failed: <error>. Transition was still attempted.`
 
 ---
 
 ## Step 4 — Transition the Jira Ticket
 
-Determine the target transition from the validation outcome:
+| Outcome | Condition | Target |
+|---|---|---|
+| ✅ Full fix | All fixes passed + verification passed | `$TRANSITION_DONE` |
+| ⚠️ Partial fix | ≥1 fix applied + warnings only | `$TRANSITION_REVIEW` |
+| ❌ Issues remain | `issues_found` with ❌ checks | `$TRANSITION_REVIEW` |
+| ❌ No fixes | Zero fixes applied | comment only — leave status |
 
-| Outcome | Condition | Target status |
-|---------|-----------|---------------|
-| ✅ Full fix | All applied fixes passed validation and verification passed | `$TRANSITION_DONE` |
-| ⚠️ Partial fix | At least 1 fix applied AND verification has warnings only | `$TRANSITION_REVIEW` |
-| ❌ Issues remain | Verification result is `issues_found` with ❌ checks | `$TRANSITION_REVIEW` |
-| ❌ No fixes | Zero fixes applied | comment only — leave status unchanged |
-
-**Step 4a — List available transitions:**
 ```powershell
-& $PYTHON_CMD $JIRA_SCRIPT `
-  transitions --ticket <JIRA_TICKET_ID>
+$TARGET_TRANSITION = if ($VERIFICATION_RESULT -eq 'passed') { $TRANSITION_DONE } else { $TRANSITION_REVIEW }
+& $PYTHON_CMD $JIRA_SCRIPT transition --ticket $JIRA_TICKET_ID --name $TARGET_TRANSITION
+if ($LASTEXITCODE -ne 0) { Write-Host "⚠️ Jira transition failed. Manual transition required to: $TARGET_TRANSITION" }
 ```
-
-**Expected output:**
-```json
-[{"id": "31", "name": "Done"}, {"id": "21", "name": "In Progress"}, ...]  // example — actual transition names come from Jira
-```
-
-**Step 4b — Apply transition (skip if outcome is "No fixes"):**
-```powershell
-& $PYTHON_CMD $JIRA_SCRIPT `
-  transition --ticket <JIRA_TICKET_ID> --name "<$TRANSITION_DONE|$TRANSITION_REVIEW>"
-```
-
-**Expected output:**
-```json
-{"ticket": "HMS-XX", "transitioned_to": "Done", "status": "success"}  // example — actual value comes from config/runtime
-```
-
-If the transition command exits non-zero:
-- Log the error
-- Include in final output: `⚠️ Jira transition failed: <error>. Manual transition required to: <$TRANSITION_DONE|$TRANSITION_REVIEW>`
 
 ---
 
 ## Step 5 — Switch Back to Main Branch
-
-After the Jira transition, always return the local repo to `$BASE_BRANCH`:
 
 ```powershell
 Set-Location $REPO_ROOT
@@ -333,19 +232,152 @@ Set-Location $REPO_ROOT
 Write-Host "Switched back to $BASE_BRANCH"
 ```
 
-If checkout fails:
-- Log the error
-- Include in final output: `⚠️ Could not switch back to $BASE_BRANCH — manual checkout required`
-- Do NOT abort; this is a cleanup step only
+On failure → log error, include `"⚠️ Could not switch back to $BASE_BRANCH — manual checkout required"` in output. Do NOT abort.
+
+---
+
+## Step 6 — Write Per-Run Fix Report
+
+```powershell
+$RUN_STATUS = if ($VERIFICATION_RESULT -eq 'passed') { 'COMPLETED' } else { 'COMPLETED — issues found' }
+$TODAY = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+$FIX_TABLE_ROWS = ($FIXES_APPLIED -split '\r?\n' |
+    Where-Object { $_ -match '^FIXED' } |
+    ForEach-Object {
+        if ($_ -match 'FIXED\s+\[(\w+)\]\s*:\s*([\w\-\.]+)\s+([^\s]+)\s+\u2192\s+([^\s]+)\s+\(([^)]+)\)\s*[—-]?\s*(.*)') {
+            "| $($Matches[2]) | $($Matches[3]) | $($Matches[4]) | $($Matches[5]) | $($Matches[6].Trim()) |"
+        }
+    }) -join "`n"
+if (-not $FIX_TABLE_ROWS) { $FIX_TABLE_ROWS = "| (none) | | | | |" }
+
+$SKIPPED_BOM = ($FIXES_APPLIED -split '\r?\n' | Where-Object { $_ -match '^SKIPPED.*BOM' }) -join "`n"
+if (-not $SKIPPED_BOM) { $SKIPPED_BOM = "none" }
+$SKIPPED_UNAPPROVED = ($FIXES_APPLIED -split '\r?\n' | Where-Object { $_ -match '^SKIPPED.*not approved' }) -join "`n"
+if (-not $SKIPPED_UNAPPROVED) { $SKIPPED_UNAPPROVED = "none" }
+
+$GATE4_BLOCK = @"
+### Step 4 — Plan Approval
+- **Decision:** $GATE4_DECISION
+- **Revisions used:** $PLAN_REVISION_COUNT / 3
+- **Feedback given (if any):**
+  > $(if ($GATE4_FEEDBACK) { $GATE4_FEEDBACK } else { 'N/A' })
+"@
+
+$GATE8_BLOCK = @"
+### Step 8 — Implementation Review
+- **Decision:** $GATE8_DECISION
+- **Review fixes used:** $REVIEW_FIX_COUNT / 3
+- **Review comments (if any):**
+  > $(if ($GATE8_REVIEW_COMMENTS) { $GATE8_REVIEW_COMMENTS } else { 'N/A' })
+"@
+
+$reportContent = @"
+# GHAS Fix Report — $JIRA_TICKET_ID — $TODAY
+
+**Status:** $RUN_STATUS
+**PR:** $PR_URL
+**Branch:** $FEATURE_BRANCH
+**Service:** $SERVICE_NAME
+
+---
+
+## 0. Workflow Steps Followed
+
+$(
+  $timelineLines = @(
+    "| Step | Description | Outcome |",
+    "|------|-------------|---------|",
+    "| 1 | Context building (w2-context-builder) | ✅ Completed |",
+    "| 2 | Feature branch creation | ✅ Created: $FEATURE_BRANCH |",
+    "| 3 | Change plan generation (w2-planner) | ✅ Completed |",
+    "| 4 | Plan review | $(if ($GATE4_DECISION -eq 'approved') { '✅ Approved on first review' } elseif ($GATE4_DECISION -eq 'auto-approved') { '✅ Auto-approved by config flag' } elseif ($GATE4_DECISION -eq 'aborted') { '❌ Aborted by user' } else { "⚠️ $GATE4_DECISION — $PLAN_REVISION_COUNT revision(s) used" }) |",
+    "| 5 | Fix implementation + validation | $(if ([int]$BUILD_FAILURE_COUNT -gt 0) { "⚠️ Passed after $BUILD_FAILURE_COUNT build failure(s)" } else { '✅ Passed on first attempt' }) |",
+    "| 6 | Verification (w2-verifier) | $(if ([int]$VERIFY_FIX_COUNT -gt 0) { "⚠️ $VERIFICATION_RESULT after $VERIFY_FIX_COUNT fix cycle(s)" } else { "✅ $VERIFICATION_RESULT on first attempt" }) |",
+    "| 7 | Verification retry loop | $(if ([int]$VERIFY_FIX_COUNT -gt 0) { "🔁 $VERIFY_FIX_COUNT cycle(s) used" } else { '✅ No retries needed' }) |",
+    "| 8 | Human implementation review | $(if ($GATE8_DECISION -eq 'approved') { '✅ Approved' } elseif ($GATE8_DECISION -eq 'aborted') { '❌ Aborted by user' } elseif ($GATE8_DECISION -like '*N/A*') { 'N/A — not reached' } else { "⚠️ $GATE8_DECISION — $REVIEW_FIX_COUNT revision(s) used" }) |",
+    "| 9 | PR creation + Jira update | ✅ $PR_URL |"
+  )
+  $timelineLines -join "`n"
+)
+
+---
+
+## 1. Dependencies Fixed
+| Dependency | Old Version | New Version | Strategy | CVEs Resolved |
+|---|---|---|---|---|
+$FIX_TABLE_ROWS
+
+**Skipped (BOM-managed):** $SKIPPED_BOM
+**Skipped (not approved):** $SKIPPED_UNAPPROVED
+
+---
+
+## 2. Human Gate Decisions
+
+$GATE4_BLOCK
+
+$GATE8_BLOCK
+
+---
+
+## 3. Build & Validation Results
+
+$VALIDATION_RESULTS
+
+---
+
+## 4. Verification Results
+**Overall:** $VERIFICATION_RESULT
+
+$COVERAGE_SUMMARY
+
+---
+
+## 5. Retry Counters
+- Plan revisions: $PLAN_REVISION_COUNT / 3
+- Build failures: $BUILD_FAILURE_COUNT / 3
+- Verify fixes: $VERIFY_FIX_COUNT / 3
+- Review fixes: $REVIEW_FIX_COUNT / 3
+
+---
+
+## 6. Issues Encountered
+
+$(
+  $issuesSections = @()
+  if ($BUILD_FAILURE_DETAILS -and $BUILD_FAILURE_DETAILS -ne '') {
+    $issuesSections += "### Build Failures`n$BUILD_FAILURE_DETAILS"
+  }
+  if ($VERIFY_ISSUES_DETAIL -and $VERIFY_ISSUES_DETAIL -ne '') {
+    $issuesSections += "### Verification Issues`n$VERIFY_ISSUES_DETAIL"
+  }
+  if ($issuesSections.Count -eq 0) {
+    "_No issues encountered — all steps passed on first attempt._"
+  } else {
+    $issuesSections -join "`n`n"
+  }
+)
+
+---
+"@
+
+Set-Content -Path $FIX_REPORT_PATH -Value $reportContent -Encoding UTF8
+Write-Host "Fix report written: $FIX_REPORT_PATH"
+
+Set-Location $REPO_ROOT
+& $GIT_BASH -c "git add '$FIX_REPORT_PATH'"
+Write-Host "Fix report staged for commit"
+```
+
+On `Set-Content` failure → log error, include `"⚠️ Fix report write failed"` in output. Do NOT abort.
 
 ---
 
 ## Rules
-- Report real data only — never fabricate numbers, comment IDs, or statuses
-- If PR creation fails, log the error and continue — do not abort the workflow
-- Write the report to a temp file before posting — do NOT try to pass it inline
-- Always post the Jira comment even if the PR or transition fails
-- Always attempt the Jira transition even if the comment fails
-- Include the PR URL in the report header — write "(PR creation failed)" if gh pr create failed
-- Always switch back to `$BASE_BRANCH` as the final cleanup step — never leave the repo on the feature branch
-- This report is the final artefact of Workflow 2; make it complete enough to hand off to a human reviewer
+- Never fabricate numbers, comment IDs, or statuses
+- PR creation fails → log error, continue — do not abort
+- Always attempt Jira comment (Step 3) even if PR failed
+- Always attempt Jira transition (Step 4) even if comment failed
+- Always switch back to `$BASE_BRANCH` as final cleanup — never leave on feature branch
+- Always write the fix report last — even if PR or Jira steps failed. Use `Set-Content` (not `Add-Content`). Stage explicitly with `git add`.

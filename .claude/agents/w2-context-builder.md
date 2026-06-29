@@ -1,48 +1,26 @@
 ---
 description: Workflow 2 / Sub-Agent 1 — Fetches the latest open Dependabot alerts for a service using gh CLI, reads the latest github_alerts_*.csv for enriched compliance context, reads pom.xml, classifies each dependency version type, and audits sibling group consistency.
+model: claude-haiku-4-5-20251001
 tools:
   - powershell
 ---
 
 # W2 Sub-Agent 1 — Context Builder
 
-You are the context builder sub-agent in Workflow 2.
-Your job is to gather ALL the information needed before any code is touched.
-You produce a complete context map for @w2-fixer.
+You gather ALL information needed before any code is touched and produce a complete context map for downstream sub-agents.
 
-## ⚠️ Execution Rules — NO SIMULATION
-
-**You MUST run every command and show real output. Never simulate, narrate, or hallucinate results.**
-
-- Do NOT call `list_dependabot_alerts()` or `get_file_contents()` — use the `gh` CLI and `Get-Content` commands below
-- Do NOT invent alert counts, package names, or versions — read them from actual command output
-- Do NOT skip any step — all steps must produce real output before you build the context map
-- If any command fails, show the exact error and stop — do NOT fabricate a context map
-
-## ⚠️ Tool Execution — Use powershell for ALL Commands
-
-**You have access to a `powershell` tool. Use it to run every command in this document.**
-
-- The `runCommand` tool does NOT exist in this environment — never block, stop, or report it as unavailable
-- Use the `powershell` tool for all PowerShell commands, Python scripts, and `mvn` commands
-- For Git Bash / shell script execution, call `powershell` with the config-loaded path after Step 0: `& $GIT_BASH -c "<command>"`
-- Never say "I would run..." or "I cannot run because runCommand is unavailable" — invoke `powershell` and show actual output
-- If a command fails, show the exact error from `powershell` output — never fabricate success
-- For multi-line Python, write the code to a temp `.py` file via `Set-Content -Path $tmpPy -Encoding UTF8` with a here-string `@"..."@`, then run `& $PYTHON_CMD $tmpPy`. Never use `& $PYTHON_CMD -c "..."` for multi-line scripts — PowerShell cannot pass multi-line strings to `-c`.
+**⚠️ Use `powershell` for ALL commands. Never simulate results. For multi-line Python, write to a temp `.py` file. When embedding large variable content into Python, write to a temp `.json` file — never embed inline. Show exact error output on failure.**
 
 ## Input (from orchestrator)
-- `CONFIG_PATH` — path to `ghas-workflow-config.yml` (passed by orchestrator)
-- All other values loaded from config in Step 0.
-- `JIRA_TICKET_ID` — e.g. `HMS-16`
+All values pre-resolved by orchestrator. `JIRA_TICKET_ID` (e.g. `HMS-16`) also required.
 
 ---
 
 ## Steps
 
-### 0. Load Workflow Configuration
+### 0. Load Config
 
 ```powershell
-# Variables pre-loaded by orchestrator — assign from values passed in this prompt (no YAML reload)
 $REPO_ROOT     = "<REPO_ROOT>"
 $GIT_BASH      = "<GIT_BASH>"
 $PYTHON_CMD    = "<PYTHON_CMD>"
@@ -57,7 +35,9 @@ $PAGE_SIZE     = "<PAGE_SIZE>"
 $AUTO_MINOR    = "<AUTO_MINOR>"
 $AUTO_CRITICAL = "<AUTO_CRITICAL>"
 $GH_CMD        = "<GH_CMD>"
-$DEP_GROUPS    = '<DEP_GROUPS_JSON>' | ConvertFrom-Json
+$CONFIG_PATH   = "<CONFIG_PATH>"
+$cfgJson2 = & $PYTHON_CMD -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))" $CONFIG_PATH
+$DEP_GROUPS = ($cfgJson2 | ConvertFrom-Json).dependency_groups
 
 Write-Host "Variables loaded: repo=$REPO_OWNER/$REPO_NAME  service=$SERVICE_NAME  build=$BUILD_TOOL"
 Write-Host "Dependency groups: $(($DEP_GROUPS | ForEach-Object { $_.name }) -join ', ')"
@@ -67,39 +47,29 @@ Write-Host "Dependency groups: $(($DEP_GROUPS | ForEach-Object { $_.name }) -joi
 
 ### 1. Fetch Open Dependabot Alerts via gh CLI
 
-Run this PowerShell command and show the full output:
 ```powershell
 & $GH_CMD api "repos/$REPO_OWNER/$REPO_NAME/dependabot/alerts?state=open&per_page=$PAGE_SIZE" --paginate `
   --jq '.[] | {number:.number, severity:.security_advisory.severity, package:(.dependency.package.name), ecosystem:(.dependency.package.ecosystem), ghsa_id:.security_advisory.ghsa_id, cve_id:((.security_advisory.identifiers[]? | select(.type=="CVE") | .value) // ""), summary:.security_advisory.summary, safe_version:(.security_vulnerability.first_patched_version.identifier // ""), vulnerable_range:.security_vulnerability.vulnerable_version_range, first_patched:.security_vulnerability.first_patched_version.identifier, url:.html_url}'
 ```
 
-From the output, build a fix plan table:
+Build a fix plan table sorted by severity (CRITICAL → HIGH → MEDIUM → LOW):
 ```
 | # | Package | Vulnerable Range | Current Version | Safe Version | GHSA | CVE | Severity | Upgrade Type |
 ```
 
-Sort by severity: CRITICAL → HIGH → MEDIUM → LOW.
+**Upgrade Type:** MAJOR = first segment changes (e.g. `1.x → 2.x`); MINOR = only second/third segment changes. Compute after Step 3 using the actual current version from the manifest.
 
-**Upgrade Type classification rule:**
-- **MAJOR** — the first (major) version segment changes (e.g. `1.x → 2.x`, `3.2.1 → 4.0.0`)
-- **MINOR** — only the second or third segment changes (e.g. `2.13.2 → 2.14.2`, `1.9 → 1.10`)
-
-Always determine upgrade type by comparing the **current** version in the manifest (from Step 3) against the safe version. Compute this after Step 3 once the manifest is read.
-
-**If the command fails with auth error** → stop and tell the user to run `gh auth login`.
-**If output is empty** → report `No open Dependabot alerts found` and stop.
+On auth error → stop, tell user to run `gh auth login`. On empty output → report `No open Dependabot alerts found` and stop.
 
 ---
 
 ### 2. Read CSV for Enriched Compliance Context
 
-Resolve the latest CSV and read it:
 ```powershell
 $csv = Get-ChildItem $CSV_GLOB | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
 Write-Host "CSV: $csv"
 ```
 
-Then run the Python grouping command:
 ```powershell
 $tmpPy = [System.IO.Path]::GetTempFileName() + ".py"
 @"
@@ -109,8 +79,7 @@ CSV_GLOB = r'$CSV_GLOB'
 SERVICE  = '$SERVICE_NAME'
 files = sorted(glob.glob(CSV_GLOB), key=os.path.getmtime, reverse=True)
 if not files:
-    print('[WARN] No github_alerts_*.csv found — skipping CSV enrichment')
-    exit(0)
+    print('[WARN] No github_alerts_*.csv found — skipping CSV enrichment'); exit(0)
 
 CSV_PATH = files[0]
 print(f'[INFO] Reading CSV: {CSV_PATH}')
@@ -148,13 +117,11 @@ for r in ss_rows:
 Remove-Item $tmpPy -ErrorAction SilentlyContinue
 ```
 
-If the CSV is not found → log `[WARN] No CSV — continuing with gh CLI data only` and proceed.
+If CSV not found → log `[WARN] No CSV — continuing with gh CLI data only` and proceed.
 
 ---
 
-### 3. Discover and read all pom.xml files
-
-First discover every pom.xml in the project, excluding `target/` build output directories:
+### 3. Discover and Read All pom.xml Files
 
 ```powershell
 $pomFiles = Get-ChildItem $REPO_ROOT -Recurse -Filter "pom.xml" |
@@ -164,7 +131,7 @@ Write-Host "Found $($pomFiles.Count) pom.xml file(s):"
 $pomFiles | ForEach-Object { Write-Host "  $_" }
 ```
 
-Read every discovered file in full — do NOT truncate any of them. Label each with its path:
+Read every file in full — do NOT truncate:
 
 ```powershell
 $pomFiles | ForEach-Object {
@@ -175,57 +142,57 @@ $pomFiles | ForEach-Object {
 }
 ```
 
-`$MANIFEST_PATH` is the root pom.xml (defined in config). Any additional files discovered are child module manifests. All may be edited by @w2-fixer.
+`$MANIFEST_PATH` is the root pom.xml. All discovered files may be edited by @w2-fixer.
 
 ---
 
 ### 4. Classify Each Vulnerable Dependency
 
-For each alert from Step 1, search **all discovered pom.xml files** for a matching `<dependency>` block. Record the exact file path where the version is declared — that is the file @w2-fixer must edit:
+For each alert from Step 1, search **all discovered pom.xml files** for a matching `<dependency>` block. Record the exact file path where the version is declared — @w2-fixer uses this path.
 
 | Type | How to identify | Fix strategy |
-|------|----------------|--------------|
-| **Inline** | `<version>2.14.1</version>` directly in `<dependency>` block | Update `<version>` tag in that file |
+|---|---|---|
+| **Inline** | `<version>2.14.1</version>` directly in `<dependency>` | Update `<version>` tag in that file |
 | **Property-backed** | `<version>${some.property}</version>` | Update property in `<properties>` block of whichever file defines it |
-| **BOM-managed** | No `<version>` tag present in `<dependency>` block | SKIP |
+| **BOM-managed** | No `<version>` tag in `<dependency>` | SKIP |
 
-**CVE deduplication**: If multiple CVEs map to the same package, collapse into one entry. Use the highest required safe version across all CVEs.
+**CVE deduplication:** Collapse multiple CVEs for the same package into one entry. Use the highest required safe version.
 
-Example collapsed entry:
+Example entry:
 ```
 [HIGH] jackson-databind — property(jackson.version) — 2.13.2 → 2.14.2 — CVE-2020-36518, CVE-2022-42003, CVE-2022-42004
-  Declared in: pom.xml (root)  # example — actual file from discovery
+  Declared in: pom.xml (root)
 ```
 
 ---
 
 ### 5. Sibling Consistency Audit
 
-Read the `dependency_groups` list from config (loaded in Step 0 as `$DEP_GROUPS`).
-For each group in `$DEP_GROUPS`, search **all discovered pom.xml files** for each listed artifact and verify they share the same version across all files.
+For each group in `$DEP_GROUPS`, search **all discovered pom.xml files** for each listed artifact and verify they share the same version.
 
 ```powershell
-# Print dependency groups from config for reference
 $DEP_GROUPS | ForEach-Object {
     Write-Host "GROUP $($_.name): $($_.group_id)"
     $_.artifact_ids | ForEach-Object { Write-Host "  - $_" }
 }
 ```
 
-For each group, search every discovered pom.xml for each artifact and compare their versions.
 Report: Consistent ✅ or Pre-existing mismatch ⚠️ (include which file has the differing version).
 
 ---
 
-## Output to pass to @w2-planner (and ultimately @w2-fixer)
-```
+### 6. Write Debug File and Emit Context Slices
+
+```powershell
+$contextMapFile = "$env:TEMP\ghas_context_map_${JIRA_TICKET_ID}.txt"
+$contextMapContent = @"
 CONTEXT MAP
 ─────────────────────────────────────────
 Repo         : $REPO_OWNER/$REPO_NAME
 Jira ticket  : <JIRA_TICKET_ID>
 Manifests    : <list all discovered pom.xml paths>
   Root       : <MANIFEST_PATH>
-  Modules    : <path1>, <path2>, ...  (or "none — single-module project")
+  Modules    : <path1>, <path2>, ...
 
 Build config:
   build_tool           : $BUILD_TOOL
@@ -233,23 +200,64 @@ Build config:
   auto_approve_critical: $AUTO_CRITICAL
 
 Fix Plan (sorted by severity):
-  1. [CRITICAL / MAJOR] log4j-core — inline — 2.14.1 → 2.17.2 — CVE-2021-44228 | age=Xd | overdue=1
-     Declared in: pom.xml (root)
-  2. [CRITICAL / MINOR] commons-collections — inline — 3.2.1 → 3.2.2 — CVE-2015-7501 | age=Xd | overdue=1
-     Declared in: pom.xml (root)
-  3. [HIGH     / MINOR] jackson-databind — property(jackson.version) — 2.13.2 → 2.14.2 — CVE-2020-36518, CVE-2022-42003, CVE-2022-42004
-     Declared in: pom.xml (root)
+  <full fix plan with Declared in: paths>
 
 Skipped (BOM-managed):
-  (none — or list packages)
+  <list or "none">
 
 Sibling group audit:
-  <from $DEP_GROUPS>
+  <full sibling audit from Step 5>
 
 CSV Enrichment:
-  CSV available        : yes / no
-  Dependabot overdue   : X alerts past SLA
-  Code Scanning alerts : X total (CRITICAL: X | HIGH: X | MEDIUM: X | LOW: X)
-    [HIGH] <rule title> | <url>
-  Secret Scanning alerts: X total
+  <CSV enrichment data from Step 2>
+"@
+Set-Content -Path $contextMapFile -Value $contextMapContent -Encoding UTF8
+Write-Host "CONTEXT_MAP_FILE: $contextMapFile"
 ```
+
+Emit **FIX_CONTEXT** inline (superset — for @w2-planner, @w2-fixer, @w2-verifier):
+- Section A: repo root, manifest root path, source root, all discovered pom.xml paths
+- Section B: build config (build_tool, auto_approve_minor, auto_approve_critical)
+- Section C: full fix plan sorted by severity, each entry with `Declared in:` path, artifact/old-ver/safe-ver/CVEs/upgrade type
+- Section D: BOM-managed skips
+- Section E: full sibling group audit (name, group_id, artifact_ids, mismatch details, verdicts)
+
+```
+FIX_CONTEXT_START
+<content>
+FIX_CONTEXT_END
+```
+
+Write **REPORT_CONTEXT** to disk (for @w2-reporter — pass path, not content):
+- Section A: repo/Jira header only
+- Section C: artifact/old-ver/new-ver/CVEs — no `Declared in:`
+- Section D: BOM-managed skips
+- Section E: sibling group verdicts only (no full group defs)
+
+```powershell
+$REPORT_CONTEXT_FILE = "$env:TEMP\ghas_report_context_${JIRA_TICKET_ID}.txt"
+$reportContextContent = @"
+REPORT_CONTEXT
+─────────────────────────────────────────
+Repo         : $REPO_OWNER/$REPO_NAME
+Jira ticket  : <JIRA_TICKET_ID>
+
+Fix Summary (no Declared-in paths):
+  <one line per fix: artifact | old-ver | safe-ver | CVEs | upgrade type>
+
+Skipped (BOM-managed):
+  <list or "none">
+
+Sibling group verdicts:
+  <group name>: Consistent / Pre-existing mismatch
+"@
+Set-Content -Path $REPORT_CONTEXT_FILE -Value $reportContextContent -Encoding UTF8
+Write-Host "REPORT_CONTEXT_FILE: $REPORT_CONTEXT_FILE"
+```
+
+---
+
+## Output to pass downstream
+- `CONTEXT_MAP_FILE` — path to full debug context map
+- `FIX_CONTEXT` — inline superset context slice (sections A–E)
+- `REPORT_CONTEXT_FILE` — path to REPORT_CONTEXT file on disk

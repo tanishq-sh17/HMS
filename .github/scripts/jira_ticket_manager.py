@@ -298,13 +298,12 @@ def build_adf_description(service_name, grouped_alerts):
     })
 
     # ── Compliance / Non-Compliance breakdown table ───────────────────────────
-    all_dep = dep_alerts  # compliance tracking is based on Dependabot alerts
     content.append(_para(_colored_text("Compliance Summary:", "#0052CC", bold=True)))
     comp_header = _table_row([_table_header_cell(h) for h in
                                ["Severity", "Total", "Compliant", "Non-Compliant"]])
     comp_rows = [comp_header]
     for sev in severities:
-        bucket      = [a for a in all_dep if (a.get("severity") or "").upper() == sev]
+        bucket      = [a for a in dep_alerts if (a.get("severity") or "").upper() == sev]
         total_sev   = len(bucket)
         non_comp    = sum(1 for a in bucket if str(a.get("nonCompliant", "0")).strip() == "1")
         compliant   = total_sev - non_comp
@@ -555,21 +554,27 @@ def cmd_comment(args):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Shared helper: fetch transitions list
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_transitions_list(ticket, base_url, headers):
+    """Return list of {id, name} dicts for a ticket's available transitions."""
+    url  = f"{base_url}/rest/api/3/issue/{ticket}/transitions"
+    resp = jira_request("GET", url, headers)
+    if resp.status_code != 200:
+        print(f"ERROR: Get transitions failed ({resp.status_code}): {resp.text}", file=sys.stderr)
+        sys.exit(1)
+    return resp.json().get("transitions", [])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Command: transitions
 # ─────────────────────────────────────────────────────────────────────────────
 
 def cmd_transitions(args):
     """List available workflow transitions for a ticket. Prints JSON list."""
     base_url, headers = get_auth()
-    url  = f"{base_url}/rest/api/3/issue/{args.ticket}/transitions"
-    resp = jira_request("GET", url, headers)
-
-    if resp.status_code != 200:
-        print(f"ERROR: Get transitions failed ({resp.status_code}): {resp.text}", file=sys.stderr)
-        sys.exit(1)
-
-    data   = resp.json()
-    result = [{"id": t["id"], "name": t["name"]} for t in data.get("transitions", [])]
+    result = [{"id": t["id"], "name": t["name"]} for t in _get_transitions_list(args.ticket, base_url, headers)]
     print(json.dumps(result, indent=2))
 
 
@@ -580,15 +585,7 @@ def cmd_transitions(args):
 def cmd_transition(args):
     """Transition a Jira ticket to the named status. Looks up the transition ID first."""
     base_url, headers = get_auth()
-
-    # Get available transitions
-    url  = f"{base_url}/rest/api/3/issue/{args.ticket}/transitions"
-    resp = jira_request("GET", url, headers)
-    if resp.status_code != 200:
-        print(f"ERROR: Get transitions failed ({resp.status_code}): {resp.text}", file=sys.stderr)
-        sys.exit(1)
-
-    transitions = resp.json().get("transitions", [])
+    transitions = _get_transitions_list(args.ticket, base_url, headers)
     target_name = args.name.lower()
     match = next((t for t in transitions if target_name in t["name"].lower()), None)
 
@@ -597,13 +594,11 @@ def cmd_transition(args):
         print(f"ERROR: No transition matching '{args.name}'. Available: {available}", file=sys.stderr)
         sys.exit(1)
 
-    transition_id = match["id"]
-    payload = {"transition": {"id": transition_id}}
-    url2  = f"{base_url}/rest/api/3/issue/{args.ticket}/transitions"
-    resp2 = jira_request("POST", url2, headers, json=payload)
+    url  = f"{base_url}/rest/api/3/issue/{args.ticket}/transitions"
+    resp = jira_request("POST", url, headers, json={"transition": {"id": match["id"]}})
 
-    if resp2.status_code not in (200, 201, 204):
-        print(f"ERROR: Transition failed ({resp2.status_code}): {resp2.text}", file=sys.stderr)
+    if resp.status_code not in (200, 201, 204):
+        print(f"ERROR: Transition failed ({resp.status_code}): {resp.text}", file=sys.stderr)
         sys.exit(1)
 
     print(json.dumps({"ticket": args.ticket, "transitioned_to": match["name"], "status": "success"}))
@@ -615,14 +610,12 @@ def cmd_transition(args):
 
 def cmd_update_description(args):
     """Re-generate and PUT the ADF description for an existing ticket from a CSV."""
-    import csv as _csv
-
     base_url, headers = get_auth()
 
     # Read alerts for the service from the CSV
     alerts = []
     with open(args.csv, newline="", encoding="utf-8") as fh:
-        reader = _csv.DictReader(fh)
+        reader = csv.DictReader(fh)
         for row in reader:
             svc = (row.get("service") or "").strip().upper()
             if svc == args.service.strip().upper():
@@ -645,6 +638,41 @@ def cmd_update_description(args):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ADF text extractor + Command: get
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _adf_to_text(node):
+    """Recursively extract plain text from an ADF node or list."""
+    if isinstance(node, list):
+        return " ".join(_adf_to_text(n) for n in node)
+    if isinstance(node, dict):
+        if node.get("type") == "text":
+            return node.get("text", "")
+        return " ".join(_adf_to_text(c) for c in node.get("content", []))
+    return ""
+
+
+def cmd_get(args):
+    """Fetch a single Jira issue: key, status, summary, labels, description as plain text."""
+    base_url, headers = get_auth()
+    url  = f"{base_url}/rest/api/3/issue/{args.ticket}"
+    resp = jira_request("GET", url, headers, params={"fields": "summary,status,labels,description"})
+
+    if resp.status_code != 200:
+        print(f"ERROR: Get issue failed ({resp.status_code}): {resp.text}", file=sys.stderr)
+        sys.exit(1)
+
+    fields = resp.json().get("fields", {})
+    print(json.dumps({
+        "key":              args.ticket,
+        "status":           fields.get("status", {}).get("name", ""),
+        "summary":          fields.get("summary", ""),
+        "labels":           fields.get("labels", []),
+        "description_text": _adf_to_text(fields.get("description") or {}),
+    }))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -657,6 +685,10 @@ def main():
     p_search.add_argument("--project", default=None, help="Jira project key (required unless --jql is used)")
     p_search.add_argument("--labels",  default=None, help="Comma-separated labels, e.g. GHAS,HMS (required unless --jql is used)")
     p_search.add_argument("--jql",     default=None, help="Raw JQL query string; overrides --project and --labels")
+
+    # get
+    p_get = sub.add_parser("get", help="Fetch a single issue: key, status, labels, description text")
+    p_get.add_argument("--ticket", required=True, help="Jira issue key, e.g. HMS-16")
 
     # create
     p_create = sub.add_parser("create", help="Create one consolidated ticket for a service")
@@ -688,12 +720,13 @@ def main():
     args = parser.parse_args()
 
     commands = {
+        "search":            cmd_search,
+        "get":               cmd_get,
+        "create":            cmd_create,
+        "comment":           cmd_comment,
         "update-description": cmd_update_description,
-        "search":      cmd_search,
-        "create":      cmd_create,
-        "comment":     cmd_comment,
-        "transitions": cmd_transitions,
-        "transition":  cmd_transition,
+        "transitions":       cmd_transitions,
+        "transition":        cmd_transition,
     }
     commands[args.command](args)
 

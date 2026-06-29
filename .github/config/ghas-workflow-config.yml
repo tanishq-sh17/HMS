@@ -55,7 +55,8 @@ jira:
   labels: [GHAS]
 
   assignee: null                    # Jira accountId string, or null for unassigned
-  parent_jira: null                 # Parent epic key (e.g. HMS-5), or null
+  parent_jira: null                 # Parent epic key (e.g. HMS-5), or null. When set: (1) attached as parent on new tickets, (2) added to duplicate-search JQL — only tickets under this epic are considered. Null = search all epics.
+  search_labels: null               # Labels that must ALL appear on a ticket to match duplicate search. Null = defaults to jira.labels. Override per-team (e.g. [GHAS, Security]) to narrow the search further.
   story_points: null                 # Story points for new tickets (set to null if field not on screen)
   team: null                        # Team name, or null to leave blank
   priority: High                    # Ticket priority — set by business, not mapped per severity
@@ -102,7 +103,7 @@ scripts:
 # --------------------------------------------------------------
 csv:
   output_dir: "."                   # Directory for CSV output, relative to repo_root ("." = repo root)
-  filename_pattern: "github_alerts_{timestamp}.csv"  # {timestamp} = YYYYMMDD_HHMMSS
+  filename_pattern: "github_alerts_{service}_{timestamp}.csv"  # {service} = service name, {timestamp} = YYYYMMDD_HHMMSS
   glob_pattern: "github_alerts_*.csv"
   # Column header written to new CSV files (must match fetch_alerts.sh output)
   header: "service,type,ghsa_id,cve_id,title,severity,created,due,url,Application,nonCompliant,ageDays"
@@ -116,7 +117,6 @@ csv:
 services:
   - name: HMS                       # Service display name (used in Jira labels and CSV)
     github_repo: HMS                # GitHub repository name (may differ from service name)
-
 
 # --------------------------------------------------------------
 # WORKFLOW 2 — Vulnerability Resolver settings
