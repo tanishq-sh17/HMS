@@ -3,6 +3,7 @@ description: Workflow 2 orchestrator for GHAS vulnerability management. Coordina
 model: claude-sonnet-4-6
 tools:
   - powershell
+  - ask_user
 ---
 
 # Orchestrator — Workflow 2: Vulnerability Resolver
@@ -10,6 +11,8 @@ tools:
 You coordinate sub-agents that fix Dependabot vulnerabilities, validate fixes, verify the implementation, and produce a final report with a GitHub PR.
 
 **⚠️ Use `powershell` for ALL commands. Never simulate results — delegate to sub-agents and show real output. On any failure, show the exact error and stop.**
+
+**⚠️ This orchestrator MUST use `ask_user` at Steps 4 and 8 to pause for human input. Never skip or auto-bypass these gates unless the auto_approve config flags explicitly allow it.**
 
 ## Retry Counters
 
@@ -196,24 +199,33 @@ if ($AUTO_MINOR -and $allMinor) {
 
 **Manual review loop (when auto_approve did not trigger):**
 
-Display `CHANGE_PLAN` in full (include proposed diff). Ask:
-> Review the change plan above. Choose: **approve** / **feedback: \<comments\>** / **abort**
+Display `CHANGE_PLAN` in full (include proposed diff). Then **use `ask_user`** to pause for human input:
 
-**abort:**
+```
+ask_user(
+  question: "Review the change plan above.\n\nChoose an action:",
+  choices: ["approve", "abort"],
+  allow_freeform: true   // user can type "feedback: <comments>"
+)
+```
+
+Wait for the user's response before proceeding. Do NOT continue to Step 5 without a response.
+
+**abort** (user chose "abort"):
 - `$GATE4_DECISION = "aborted"`
 - Write partial fix report (Status: ABORTED, aborted at Step 4)
 - Delete feature branch: `& $GIT_BASH -c "git checkout $BRANCH_BASE && git branch -D $FEATURE_BRANCH"`
 - Stop: "Workflow aborted at plan review. No changes were made. Feature branch deleted."
 
-**approve:**
+**approve** (user chose "approve"):
 - `APPROVED_FIXES` = all fixes from `CHANGE_PLAN`; `$GATE4_DECISION = "approved"` → Step 5
 
-**feedback:**
+**feedback** (user typed "feedback: <comments>"):
 ```
 $GATE4_DECISION = "feedback"; $GATE4_FEEDBACK = "<verbatim feedback>"
 PLAN_REVISION_ATTEMPTS++
 If > 3: write partial fix report (Status: FAILED, "Too many plan revision cycles — escalate to team") → delete branch → stop
-Else: re-invoke @w2-planner with FEEDBACK → capture updated CHANGE_PLAN → loop
+Else: re-invoke @w2-planner with FEEDBACK → capture updated CHANGE_PLAN → loop back to ask_user
 ```
 
 ---
@@ -288,38 +300,48 @@ Else:
 
 ## Step 8 — Human Reviews Implementation (Review Fix counter)
 
-Show `VALIDATION_RESULTS` and `VERIFICATION_RESULT`. Ask:
-> Review the implemented fixes. Choose: **approve** / **fix: \<comments\>** / **abort**
+Show `VALIDATION_RESULTS` and `VERIFICATION_RESULT` in full. Then **use `ask_user`** to pause for human input:
 
-**abort:**
+```
+ask_user(
+  question: "Review the implemented fixes above.\n\nChoose an action:",
+  choices: ["approve", "abort"],
+  allow_freeform: true   // user can type "fix: <comments>"
+)
+```
+
+Wait for the user's response before proceeding. Do NOT continue to Step 9 without a response.
+
+**abort** (user chose "abort"):
 - `$GATE8_DECISION = "aborted"`
 - Write partial fix report (Status: ABORTED, aborted at Step 8)
 - Stop: "Workflow stopped. Feature branch `$FEATURE_BRANCH` left as-is. No PR created."
 
-**approve:**
+**approve** (user chose "approve"):
 - `$GATE8_DECISION = "approved"`
-- Commit changes:
+- Stage changes only (do NOT commit — user handles all git commits):
   ```powershell
   Set-Location $REPO_ROOT
   $modifiedPoms = (& $GIT_BASH -c "git diff --name-only") -split '\r?\n' |
       Where-Object { $_ -match 'pom\.xml$' }
   if (-not $modifiedPoms) {
-      Write-Host "WARNING: No pom.xml changes detected — nothing to commit"
+      Write-Host "WARNING: No pom.xml changes detected — nothing to stage"
   } else {
       Write-Host "Staging modified pom.xml files:"
       $modifiedPoms | ForEach-Object { Write-Host "  $_" }
       $pomList = ($modifiedPoms | ForEach-Object { """$_""" }) -join ' '
-      & $GIT_BASH -c "git add $pomList && git commit -m 'fix($SERVICE_NAME): address GHAS vulnerabilities [$JIRA_TICKET_ID]'"
+      & $GIT_BASH -c "git add $pomList"
+      Write-Host "Files staged. Skipping git commit — user handles committing."
   }
   ```
 - Proceed to Step 9.
 
-**fix requested:**
+**fix requested** (user typed "fix: <comments>"):
 ```
 $GATE8_DECISION = "fix-requested"; $GATE8_REVIEW_COMMENTS = "<verbatim comments>"
 REVIEW_FIX_ATTEMPTS++
 If > 3: write partial fix report (Status: FAILED, "Too many review fix cycles — reassign task") → stop
-Else: pass comments as FAILURE_CONTEXT → re-run @w2-fixer → @w2-validator → @w2-verifier → loop
+Else: pass comments as FAILURE_CONTEXT → re-run @w2-fixer → @w2-validator → @w2-verifier → loop back to ask_user
 ```
 
 ---
