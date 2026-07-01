@@ -1,0 +1,196 @@
+# ==============================================================
+# GHAS Workflow 2 Configuration — Vulnerability Resolver
+# ==============================================================
+# Drives Workflow 2 (Vulnerability Resolver) only.
+# Workflow 1 settings are in ghas-w1-config.yml.
+#
+# HOW TO USE
+#   1. Fill in every [REQUIRED] field for your environment.
+#   2. Adjust retry_limits, workflow2, branch, and dependency_groups
+#      to match your project's build toolchain and escalation policy.
+#   3. Run Workflow 2 — the orchestrator validates this
+#      file at startup and fails fast on missing/invalid values.
+#
+# PORTABILITY
+#   This file is the only place you need to change to run
+#   Workflow 2 in a different project or environment.
+# ==============================================================
+
+workflow_type: w2
+
+
+# --------------------------------------------------------------
+# ENVIRONMENT — identifies your project and local machine
+# --------------------------------------------------------------
+environment:
+  repo_owner: tanishq-sh17          # [REQUIRED] GitHub owner (org or user)
+  repo_name: HMS                    # [REQUIRED] GitHub repository name
+  service_name: HMS                 # [REQUIRED] Display name used in Jira tickets and reports
+  repo_root: C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS  # [REQUIRED] Absolute path to repo root on this machine
+
+
+# --------------------------------------------------------------
+# TOOLS — CLI tool locations
+# Override if a tool is not on PATH or lives in a non-standard place.
+# Use just the binary name (e.g. "gh") if it is on PATH.
+# --------------------------------------------------------------
+tools:
+  git_bash: "C:\\Program Files\\Git\\bin\\bash.exe"  # Windows (Git for Windows default). macOS/Linux: change to "bash".
+  gh: gh                            # GitHub CLI binary
+  python: python                    # Python 3 binary
+  maven: mvn                        # Maven binary (used by build + smoke check)
+  gradle: ./gradlew                 # Gradle wrapper path, relative to repo_root
+
+
+# --------------------------------------------------------------
+# JIRA — Workflow 2 ticket interaction settings
+# --------------------------------------------------------------
+jira:
+  site_url: https://tanishqshrivas.atlassian.net  # [REQUIRED] Your Atlassian site URL (no trailing slash)
+  project_key: HMS                  # [REQUIRED] Jira project key
+
+  # Labels used to search for open tickets when no Jira ID is provided.
+  labels: [GHAS]
+
+  # Status categories used to search for open tickets.
+  open_status_categories: ["To Do", "In Progress"]
+
+  # Transition names used by the reporter at the end of Workflow 2.
+  transition_done: Done
+  transition_in_review: In Review
+
+
+# --------------------------------------------------------------
+# SCRIPTS — utility script paths (relative to repo_root)
+# --------------------------------------------------------------
+scripts:
+  jira_ticket_manager: .github/scripts/jira_ticket_manager.py
+  config_validator: .github/scripts/validate_config.py
+
+
+# --------------------------------------------------------------
+# CSV — Workflow 2 reads the latest CSV produced by Workflow 1
+# --------------------------------------------------------------
+csv:
+  output_dir: "."
+  filename_pattern: "github_alerts_{service}_{timestamp}.csv"
+  glob_pattern: "github_alerts_*.csv"
+  header: "service,type,ghsa_id,cve_id,title,severity,created,due,url,Application,nonCompliant,ageDays"
+
+
+# --------------------------------------------------------------
+# WORKFLOW 2 — Vulnerability Resolver settings
+# --------------------------------------------------------------
+workflow2:
+  # Build toolchain
+  build_tool: maven                 # Build tool: maven | gradle
+  maven_path: mvn                   # Maven binary; override if mvn is not on PATH
+  gradle_path: ./gradlew            # Gradle wrapper path, relative to repo_root
+  test_command: null                # Custom test command; null = default (mvn test / gradle test)
+
+  # Application start command for the smoke check.
+  # null = auto-detect: maven → "spring-boot:run", gradle → "bootRun"
+  start_command: null
+
+  # JaCoCo coverage report path relative to repo_root.
+  # null = auto-detect: maven  → target/site/jacoco/jacoco.xml
+  #                     gradle → build/reports/jacoco/test/jacocoTestReport.xml
+  coverage_report_path: null
+
+  # Project manifest file (relative to repo_root)
+  manifest_path: pom.xml            # pom.xml for Maven projects; build.gradle for Gradle
+
+  # Java source root for impact analysis (relative to repo_root)
+  source_root: src/main/java
+
+  # Smoke check — application health verification after fixes
+  smoke_check_url: http://localhost:8080/api/v1/swagger-ui/index.html
+  smoke_check_timeout_seconds: 60       # Seconds to wait for app startup before health probe
+  smoke_check_request_timeout_seconds: 15  # HTTP request timeout for the health probe itself
+
+  # Human-approval gate overrides
+  auto_approve_minor: false         # true = MINOR version upgrades skip the approval prompt
+  # WARNING: setting auto_approve_critical: true skips human review for ALL CRITICAL fixes,
+  # including MAJOR version bumps with breaking API changes. Keep false unless you have
+  # pre-verified that every critical upgrade in the plan is safe to apply automatically.
+  auto_approve_critical: false      # true = CRITICAL fixes skip the approval prompt
+
+  # GitHub API pagination
+  dependabot_api_page_size: 100
+
+
+# --------------------------------------------------------------
+# RUNTIME — infrastructure the application depends on
+# --------------------------------------------------------------
+runtime:
+  mysql_host: localhost
+  mysql_port: 3306
+  app_host: localhost
+  app_port: 8080
+
+
+# --------------------------------------------------------------
+# BRANCH — feature branch settings for Workflow 2
+# Placeholders for naming templates:
+#   {jira_id}         — e.g. HMS-16
+#   {primary_package} — artifact ID of most critical approved fix (lowercased, dots→hyphens)
+#   {extra_count}     — number of additional approved fixes beyond the primary one
+# --------------------------------------------------------------
+branch:
+  base_branch: main
+  naming_single: "{jira_id}-GHAS-{primary_package}"
+  naming_multi:  "{jira_id}-GHAS-{primary_package}-and-{extra_count}-more"
+
+
+# --------------------------------------------------------------
+# DEPENDENCY GROUPS — sibling version consistency rules
+# All artifacts in a group must share the same version.
+# Extend or trim this list to match your project's dependencies.
+# --------------------------------------------------------------
+dependency_groups:
+  - name: jjwt
+    group_id: io.jsonwebtoken
+    artifact_ids:
+      - jjwt-api
+      - jjwt-impl
+      - jjwt-jackson
+
+  - name: log4j
+    group_id: org.apache.logging.log4j
+    artifact_ids:
+      - log4j-core
+      - log4j-api
+
+  - name: jackson
+    group_id: com.fasterxml.jackson.core
+    artifact_ids:
+      - jackson-databind
+      - jackson-core
+      - jackson-annotations
+
+
+# --------------------------------------------------------------
+# RETRY LIMITS — maximum attempts before escalating to humans
+# Increase if builds are flaky; decrease for faster escalation.
+# All values must be positive integers (minimum 1).
+# --------------------------------------------------------------
+retry_limits:
+  plan_revision_max: 3    # Max plan feedback cycles before escalating to team
+  build_failure_max: 3    # Max build/test failures before escalating to engineer
+  verify_fix_max: 3       # Max verifier re-run cycles before requiring manual review
+  review_fix_max: 3       # Max human-requested fix cycles before reassigning task
+
+
+# --------------------------------------------------------------
+# VALIDATION — fields checked at startup before any agent runs
+# --------------------------------------------------------------
+validation:
+  required_fields:
+    - environment.repo_owner
+    - environment.repo_name
+    - environment.service_name
+    - environment.repo_root
+    - jira.site_url
+    - jira.project_key
+  required_paths:
+    - environment.repo_root

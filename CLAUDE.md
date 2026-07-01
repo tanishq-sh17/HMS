@@ -166,7 +166,7 @@ All tests are service-layer unit tests using Mockito (`@ExtendWith(MockitoExtens
 **GitHub CLI** — run `gh auth login` once (no token file needed; `fetch_alerts.sh` uses keyring auth).
 
 **Jira API** — All Jira operations use `jira_ticket_manager.py` (pure Python, no MCP). Setup is required once:
-1. `pip install requests python-dotenv` (one-time)
+1. `pip install requests python-dotenv pyyaml` (one-time)
 2. Fill in `.env` at repo root:
    ```
    JIRA_BASE_URL=https://tanishqshrivas.atlassian.net   # also accepted as JIRA_URL
@@ -213,9 +213,10 @@ A two-workflow, multi-agent system lives in `.github/agents/` (mirrored in `.cla
     w2-validator.md
     w2-verifier.md                    ← comprehensive verification before PR creation (runs before human review)
     w2-reporter.md
-  scripts/                            ← scripts invoked by agents
+  scripts/                            ← scripts invoked by agents (mirrored from .github/scripts/)
     fetch_alerts.sh                   ← active: gh CLI → timestamped CSV (all alert types)
-    fetch_dependabot_alerts.py        ← legacy: Dependabot only, Excel output
+    jira_ticket_manager.py            ← Python script — handles ALL Jira operations
+    validate_config.py                ← validates ghas-w1-config.yml / ghas-w2-config.yml at startup
 
 .github/agents/                       ← mirror of .claude/agents/ (kept in sync manually)
 ```
@@ -226,7 +227,7 @@ A two-workflow, multi-agent system lives in `.github/agents/` (mirrored in `.cla
 
 Steps run in order; any failure stops the workflow.
 
-1. **`w1-fetcher`** (Sub-Agent 1) — runs once **per service** in a multi-service loop; services are loaded from the root-level `services` array in `ghas-workflow-config.yml` as `{ name, github_repo }` objects. Runs `fetch_alerts.sh` via Git Bash using `gh` CLI; fetches Dependabot, Code Scanning, and Secret Scanning alerts; writes a timestamped CSV per service. If `ALERT_COUNT=0` the fetcher emits that count and exits successfully — it does **not** stop — the orchestrator queues those services for ticket-closure in Step 2b.
+1. **`w1-fetcher`** (Sub-Agent 1) — runs once **per service** in a multi-service loop; services are loaded from the root-level `services` array in `ghas-w1-config.yml` as `{ name, github_repo }` objects. Runs `fetch_alerts.sh` via Git Bash using `gh` CLI; fetches Dependabot, Code Scanning, and Secret Scanning alerts; writes a timestamped CSV per service. If `ALERT_COUNT=0` the fetcher emits that count and exits successfully — it does **not** stop — the orchestrator queues those services for ticket-closure in Step 2b.
 2. **Orchestrator derives `SERVICE_NAMES` inline** — after all fetchers complete, `$SERVICE_NAMES = $NONZERO_ALERT_SVCS -join ','`. **`@w1-sorter` is no longer invoked as a sub-agent.**
 3. **`w1-jira-manager`** (Sub-Agent 2, active) — searches Jira via **`jira_ticket_manager.py search`** using a JQL query filtered by labels, service, status, and optionally `parent_jira`; if an active ticket exists (status in `skip_statuses`), compares CVEs and **updates its description in-place** via `update-description`; if no active ticket exists (or prior is Done/Testing/QA), creates a fresh consolidated ticket; updates CSV with Jira key + status
 4. **Step 2b (zero-alert closure)** — if any service returned `ALERT_COUNT=0`, orchestrator uses **`jira_ticket_manager.py search`** to find open tickets, then **`jira_ticket_manager.py transition --name Done`** to close them.
@@ -262,11 +263,11 @@ services:
 
 **CSV columns (0-indexed):** `service` | `type` | `ghsa_id` | `cve_id` | `title` | `severity` | `created` | `due` | `url` | `Application` | `nonCompliant` | `ageDays` | **`jira_key`** | **`jira_status`**
 
-**Jira ticket table columns** (configured via `jira.ticket_table_columns` in `ghas-workflow-config.yml`): The `nonCompliant` column renders as **"Compliance Status"** in the ticket — CSV value `0` → "Compliant" (green), `1` → "Non-Compliant" (red, bold). Raw numbers are never shown.
+**Jira ticket table columns** (configured via `jira.ticket_table_columns` in `ghas-w1-config.yml`): The `nonCompliant` column renders as **"Compliance Status"** in the ticket — CSV value `0` → "Compliant" (green), `1` → "Non-Compliant" (red, bold). Raw numbers are never shown.
 
 ### Workflow 2 — Vulnerability Resolver
 
-Only input needed: **Jira ticket ID** (e.g. `HMS-16`); everything else is fixed config. Four retry counters with human escalation (max 3 attempts each).
+Only input needed: **Jira ticket ID** (e.g. `HMS-16`); everything else is fixed config. Four retry counters with human escalation (max attempts configurable via `retry_limits` in `ghas-w2-config.yml`, default 3).
 
 **W2 Sub-agent reference:**
 
@@ -279,15 +280,15 @@ Only input needed: **Jira ticket ID** (e.g. `HMS-16`); everything else is fixed 
 | 5 | `@w2-verifier` | Step 6 | Python `get` |
 | 6 | `@w2-reporter` | Step 9 | Python `comment`, `transition` |
 
-0. **Config validation + Jira ticket validation** — loads `ghas-workflow-config.yml`, validates required fields; validates ticket ID matches project key and fetches labels via **`jira_ticket_manager.py get`** to confirm it belongs to the intended service; all sub-agent variables resolved here once; aborts on failure
+0. **Config validation + Jira ticket validation** — loads `ghas-w2-config.yml`, validates required fields; validates ticket ID matches project key and fetches labels via **`jira_ticket_manager.py get`** to confirm it belongs to the intended service; all sub-agent variables resolved here once; aborts on failure
 1. **`w2-context-builder`** (Sub-Agent 1) — fetches open alerts; discovers **all `pom.xml` files** in the project (excludes `target/`), reads each one; reads latest CSV for context; classifies each dependency as inline / property-backed / BOM-managed and records which file declares the version (`Declared in:` field in CONTEXT_MAP); audits sibling group consistency for `jjwt-*`, `log4j-*`, `jackson-*` across all pom files
 2. **Feature branch created** — aborts if working tree is dirty; before any file is modified (named `{jira_id}-GHAS-{primary_package}[-and-N-more]`)
-3. **`w2-planner`** (Sub-Agent 2) — scans source files to find which vulnerable packages are actually imported; generates CHANGE_PLAN with proposed `pom.xml` diff and breakage risk; supports re-planning when user gives feedback (**Plan Revision counter**, max 3)
+3. **`w2-planner`** (Sub-Agent 2) — scans source files to find which vulnerable packages are actually imported; generates CHANGE_PLAN with proposed `pom.xml` diff and breakage risk; supports re-planning when user gives feedback (**Plan Revision counter**, max per `retry_limits.plan_revision_max`)
 4. **User approves plan** — checks `auto_approve_minor`/`auto_approve_critical` flags first (auto-skips manual review if triggered); otherwise **uses `ask_user`** to pause: approve / feedback+re-plan / abort; on approval all planned fixes proceed to implementation; abort → delete feature branch, no changes
-5. **`w2-fixer`** (Sub-Agent 3) **+ `w2-validator`** (Sub-Agent 4) **loop** — fixer applies all planned fixes; CRITICAL first; property-backed preferred; uses the `Declared in:` file path from CONTEXT_MAP per fix; validator runs `dependency:tree` → `compile` → `mvn test` → smoke check; on failure captures FAILURE_CONTEXT and loops back — **never reverts anything**; on > 3 build failures offers **partial-fix commit** or full escalation (**Build Failure counter**, max 3)
-6. **`w2-verifier`** (Sub-Agent 5) — Jira cross-check via **`jira_ticket_manager.py get`** → CVE manifest validation → regression check → test coverage; outputs VERIFICATION_RESULT (passed/issues_found); on issues **resets `BUILD_FAILURE_ATTEMPTS` to 0** then loops back to fixer+validator (**Verify Fix counter**, max 3)
+5. **`w2-fixer`** (Sub-Agent 3) **+ `w2-validator`** (Sub-Agent 4) **loop** — fixer applies all planned fixes; CRITICAL first; property-backed preferred; uses the `Declared in:` file path from CONTEXT_MAP per fix; validator runs `dependency:tree` → `compile` → `mvn test` → smoke check; on failure captures FAILURE_CONTEXT and loops back — **never reverts anything**; on exceeding `retry_limits.build_failure_max` build failures offers **partial-fix commit** or full escalation (**Build Failure counter**)
+6. **`w2-verifier`** (Sub-Agent 5) — Jira cross-check via **`jira_ticket_manager.py get`** → CVE manifest validation → regression check → test coverage; outputs VERIFICATION_RESULT (passed/issues_found); on issues **resets `BUILD_FAILURE_ATTEMPTS` to 0** then loops back to fixer+validator (**Verify Fix counter**, max per `retry_limits.verify_fix_max`)
 7. **Verification loop** — issues found → re-runs fixer+validator+verifier; exceeding max → escalate
-8. **Human reviews implementation** — **uses `ask_user`** to pause: approve / request fixes / abort; on approval, stages **only modified `pom.xml` files** via `git diff --name-only` (NOT `git add -u`), does NOT commit (user handles committing); fix requests pass review comments directly as FAILURE_CONTEXT and loop back through fixer + validator + verifier (**Review Fix counter**, max 3)
+8. **Human reviews implementation** — **uses `ask_user`** to pause: approve / request fixes / abort; on approval, stages **only modified `pom.xml` files** via `git diff --name-only` (NOT `git add -u`), does NOT commit (user handles committing); fix requests pass review comments directly as FAILURE_CONTEXT and loop back through fixer + validator + verifier (**Review Fix counter**, max per `retry_limits.review_fix_max`)
 9. **`w2-reporter`** (Sub-Agent 6) — pushes branch, creates GitHub PR with four mandatory elements: (1) linked to Jira ticket, (2) summary of changes, (3) test results attached, (4) verified & ready for merge; posts report as Jira comment via **`jira_ticket_manager.py comment`**; transitions ticket via **`jira_ticket_manager.py transition`** (Done / In Review); writes a **workflow summary file** (`fix-reports/SECURITY_FIX_<ticket>_<timestamp>.md`) capturing: steps followed (timeline table), decisions made (plan approval + human review gates), issues encountered (build failure errors, verifier issues), and retry counters
 
 Fix strategy rules: property-backed → update `<properties>` only (preferred); inline → update `<version>` directly; BOM-managed → skip, noted in report.

@@ -8,7 +8,7 @@ tools:
 
 # Orchestrator — Workflow 2: Vulnerability Resolver
 
-You coordinate sub-agents that fix Dependabot vulnerabilities, validate fixes, verify the implementation, and produce a final report with a GitHub PR.
+You coordinate sub-agents that fix Dependabot vulnerabilities, validate fixes, verify the implementation, and produce a final report with a GitHub PR. **This orchestrator is spawned as a foreground Agent** (not run inline by Claude, not background) — this keeps human gates at Steps 4 and 8 functional while avoiding context window bloat from multi-step retry loops.
 
 **⚠️ Use `powershell` for ALL commands. Never simulate results — delegate to sub-agents and show real output. On any failure, show the exact error and stop.**
 
@@ -16,7 +16,7 @@ You coordinate sub-agents that fix Dependabot vulnerabilities, validate fixes, v
 
 ## Retry Counters
 
-Four counters, max **3 attempts** each. When exceeded → emit escalation message, stop, leave branch as-is.
+Four counters, max attempts loaded from `retry_limits` in `ghas-w2-config.yml` (default 3 each). When exceeded → emit escalation message, stop, leave branch as-is.
 
 | Counter | Trigger | Escalation message |
 |---|---|---|
@@ -45,7 +45,7 @@ If not provided, search Jira: `project = "$JIRA_PROJECT" AND labels = "$BASE_LAB
 ```powershell
 $REPO_ROOT   = (git rev-parse --show-toplevel 2>$null).Trim() -replace '/', '\'
 if (-not $REPO_ROOT) { $REPO_ROOT = (Get-Location).Path }
-$CONFIG_PATH = "$REPO_ROOT\.github\config\ghas-workflow-config.yml"
+$CONFIG_PATH = "$REPO_ROOT\.github\config\ghas-w2-config.yml"
 
 python "$REPO_ROOT\.github\scripts\validate_config.py" $CONFIG_PATH
 if ($LASTEXITCODE -ne 0) { Write-Host "Aborting."; exit 1 }
@@ -110,8 +110,12 @@ $BUILD_TOOL        = $cfg.workflow2.build_tool
 $TEST_CMD          = $cfg.workflow2.test_command
 $START_CMD_CFG     = $cfg.workflow2.start_command
 $DEP_GROUPS_JSON   = ($cfg.dependency_groups | ConvertTo-Json -Compress -Depth 5)
+$MAX_PLAN_REVISION = if ($null -ne $cfg.retry_limits -and $null -ne $cfg.retry_limits.plan_revision_max) { [int]$cfg.retry_limits.plan_revision_max } else { 3 }
+$MAX_BUILD_FAILURE = if ($null -ne $cfg.retry_limits -and $null -ne $cfg.retry_limits.build_failure_max) { [int]$cfg.retry_limits.build_failure_max } else { 3 }
+$MAX_VERIFY_FIX    = if ($null -ne $cfg.retry_limits -and $null -ne $cfg.retry_limits.verify_fix_max)    { [int]$cfg.retry_limits.verify_fix_max    } else { 3 }
+$MAX_REVIEW_FIX    = if ($null -ne $cfg.retry_limits -and $null -ne $cfg.retry_limits.review_fix_max)    { [int]$cfg.retry_limits.review_fix_max    } else { 3 }
 
-Write-Host "All sub-agent variables resolved — no per-agent YAML reload needed"
+Write-Host "All sub-agent variables resolved — plan_max=$MAX_PLAN_REVISION  build_max=$MAX_BUILD_FAILURE  verify_max=$MAX_VERIFY_FIX  review_max=$MAX_REVIEW_FIX"
 
 $GATE4_DECISION = ""; $GATE4_FEEDBACK = ""
 $GATE8_DECISION = "N/A — not reached"; $GATE8_REVIEW_COMMENTS = ""
@@ -224,7 +228,7 @@ Wait for the user's response before proceeding. Do NOT continue to Step 5 withou
 ```
 $GATE4_DECISION = "feedback"; $GATE4_FEEDBACK = "<verbatim feedback>"
 PLAN_REVISION_ATTEMPTS++
-If > 3: write partial fix report (Status: FAILED, "Too many plan revision cycles — escalate to team") → delete branch → stop
+If > $MAX_PLAN_REVISION: write partial fix report (Status: FAILED, "Too many plan revision cycles — escalate to team") → delete branch → stop
 Else: re-invoke @w2-planner with FEEDBACK → capture updated CHANGE_PLAN → loop back to ask_user
 ```
 
@@ -254,7 +258,7 @@ Capture: `VALIDATION_RESULTS`, `VALIDATION_STATUS`, `FAILURE_CONTEXT`.
 ```
 BUILD_FAILURE_ATTEMPTS++
 $BUILD_FAILURE_DETAILS += "Build attempt $BUILD_FAILURE_ATTEMPTS failed:`n$FAILURE_CONTEXT"
-If > 3:
+If > $MAX_BUILD_FAILURE:
   $passingFixes = FIXES_APPLIED entries NOT in FAILURE_CONTEXT
   $failingFixes = FIXES_APPLIED entries in FAILURE_CONTEXT
 
@@ -289,7 +293,7 @@ Capture: `VERIFICATION_RESULT` (`passed` / `issues_found`), `ISSUES`, `COVERAGE_
 ```
 VERIFY_FIX_ATTEMPTS++
 $VERIFY_ISSUES_DETAIL += "Verify cycle $VERIFY_FIX_ATTEMPTS issues:`n$ISSUES"
-If > 3: write partial fix report (Status: FAILED, "Verification keeps failing — manual code review required") → stop
+If > $MAX_VERIFY_FIX: write partial fix report (Status: FAILED, "Verification keeps failing — manual code review required") → stop
 Else:
   BUILD_FAILURE_ATTEMPTS = 0   # reset so verify retries don't exhaust the build counter
   → Pass ISSUES as FAILURE_CONTEXT to @w2-fixer (ATTEMPT = VERIFY_FIX_ATTEMPTS + 1)
@@ -340,7 +344,7 @@ Wait for the user's response before proceeding. Do NOT continue to Step 9 withou
 ```
 $GATE8_DECISION = "fix-requested"; $GATE8_REVIEW_COMMENTS = "<verbatim comments>"
 REVIEW_FIX_ATTEMPTS++
-If > 3: write partial fix report (Status: FAILED, "Too many review fix cycles — reassign task") → stop
+If > $MAX_REVIEW_FIX: write partial fix report (Status: FAILED, "Too many review fix cycles — reassign task") → stop
 Else: pass comments as FAILURE_CONTEXT → re-run @w2-fixer → @w2-validator → @w2-verifier → loop back to ask_user
 ```
 

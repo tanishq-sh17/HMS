@@ -16,7 +16,7 @@ You coordinate sub-agents that ingest GitHub alerts and create Jira tickets. Spa
 
 Config file (auto-detected from git root):
 ```
-<repo_root>\.github\config\ghas-workflow-config.yml
+<repo_root>\.github\config\ghas-w1-config.yml
 ```
 
 ## Step 0 — Load and Validate Config
@@ -24,7 +24,7 @@ Config file (auto-detected from git root):
 ```powershell
 $REPO_ROOT   = (git rev-parse --show-toplevel 2>$null).Trim() -replace '/', '\'
 if (-not $REPO_ROOT) { $REPO_ROOT = (Get-Location).Path }
-$CONFIG_PATH = "$REPO_ROOT\.github\config\ghas-workflow-config.yml"
+$CONFIG_PATH = "$REPO_ROOT\.github\config\ghas-w1-config.yml"
 
 $result = python "$REPO_ROOT\.github\scripts\validate_config.py" $CONFIG_PATH
 if ($LASTEXITCODE -ne 0) { Write-Host "Aborting: config validation failed."; exit 1 }

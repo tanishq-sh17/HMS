@@ -42,7 +42,7 @@ except ImportError:
 _CONFIG_CACHE = None
 
 def load_config():
-    """Load ghas-workflow-config.yml from .github/config/ at the repo root.
+    """Load ghas-w1-config.yml from .github/config/ at the repo root.
     Returns a dict. Falls back to built-in defaults if the file is missing or
     PyYAML is not installed.
     """
@@ -73,7 +73,7 @@ def load_config():
 
     script_dir  = Path(__file__).resolve().parent   # .github/scripts/
     repo_root   = script_dir.parent.parent           # repo root
-    config_path = repo_root / ".github" / "config" / "ghas-workflow-config.yml"
+    config_path = repo_root / ".github" / "config" / "ghas-w1-config.yml"
 
     if not config_path.exists():
         print(f"[WARN] Config not found at {config_path} — using defaults.", file=sys.stderr)

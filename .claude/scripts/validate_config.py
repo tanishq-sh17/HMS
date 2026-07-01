@@ -5,8 +5,14 @@ validate_config.py — GHAS Workflow Configuration Validator
 Called by orchestrators before any agent is invoked.
 Exits 0 on success, non-zero with clear error messages on failure.
 
+Supports workflow-specific config files:
+  ghas-w1-config.yml  (workflow_type: w1) — Workflow 1 Alert Ingestion
+  ghas-w2-config.yml  (workflow_type: w2) — Workflow 2 Vulnerability Resolver
+
+When workflow_type is absent (legacy combined config), all checks are applied.
+
 Usage:
-    python validate_config.py <path-to-ghas-workflow-config.yml>
+    python validate_config.py <path-to-config.yml>
 """
 
 import sys
@@ -48,7 +54,13 @@ def validate(config_path: str) -> bool:
 
     errors = []
 
-    # ── Required fields ──────────────────────────────────────────
+    # ── Workflow type detection ───────────────────────────────────
+    workflow_type = cfg.get("workflow_type") or "both"
+    if workflow_type not in ("w1", "w2", "both"):
+        errors.append(f"  [INVALID] workflow_type must be 'w1' or 'w2', got '{workflow_type}'")
+        workflow_type = "both"
+
+    # ── Required fields ───────────────────────────────────────────
     required_fields = get_nested(cfg, "validation.required_fields") or [
         "environment.repo_owner",
         "environment.repo_name",
@@ -71,18 +83,54 @@ def validate(config_path: str) -> bool:
         if path_val and not os.path.exists(path_val):
             errors.append(f"  [PATH NOT FOUND] {path_field} = '{path_val}'")
 
-    # ── Semantic checks ───────────────────────────────────────────
-    build_tool = get_nested(cfg, "workflow2.build_tool")
-    if build_tool and build_tool not in ("maven", "gradle"):
-        errors.append(f"  [INVALID] workflow2.build_tool must be 'maven' or 'gradle', got '{build_tool}'")
-
+    # ── Always-on semantic checks ─────────────────────────────────
     jira_url = get_nested(cfg, "jira.site_url") or ""
     if jira_url and not jira_url.startswith("http"):
         errors.append(f"  [INVALID] jira.site_url must start with http/https, got '{jira_url}'")
 
-    services = get_nested(cfg, "services")
-    if not services:
-        errors.append("  [MISSING] services — at least one service entry is required")
+    # ── Workflow 1 checks ─────────────────────────────────────────
+    if workflow_type in ("w1", "both"):
+        services = get_nested(cfg, "services")
+        if not services:
+            errors.append("  [MISSING] services — at least one service entry is required (W1)")
+
+        valid_columns = {"ghsa_id", "cve_id", "title", "severity", "created", "due", "ageDays", "nonCompliant", "url"}
+        ticket_table_columns = get_nested(cfg, "jira.ticket_table_columns")
+        if ticket_table_columns is not None:
+            if not isinstance(ticket_table_columns, list) or len(ticket_table_columns) == 0:
+                errors.append("  [INVALID] jira.ticket_table_columns must be a non-empty list")
+            else:
+                unknown = [c for c in ticket_table_columns if c not in valid_columns]
+                if unknown:
+                    errors.append(
+                        f"  [INVALID] jira.ticket_table_columns contains unknown column(s): {unknown}. "
+                        f"Valid values: {sorted(valid_columns)}"
+                    )
+
+        summary_template = get_nested(cfg, "jira.ticket_summary_template")
+        if summary_template is not None:
+            if "{service_name}" not in summary_template:
+                errors.append("  [INVALID] jira.ticket_summary_template must contain the '{service_name}' placeholder")
+            if "{severity_summary}" not in summary_template:
+                errors.append("  [INVALID] jira.ticket_summary_template must contain the '{severity_summary}' placeholder")
+
+    # ── Workflow 2 checks ─────────────────────────────────────────
+    if workflow_type in ("w2", "both"):
+        build_tool = get_nested(cfg, "workflow2.build_tool")
+        if build_tool and build_tool not in ("maven", "gradle"):
+            errors.append(f"  [INVALID] workflow2.build_tool must be 'maven' or 'gradle', got '{build_tool}'")
+
+        retry_limits = get_nested(cfg, "retry_limits")
+        if retry_limits:
+            for limit_key in ("plan_revision_max", "build_failure_max", "verify_fix_max", "review_fix_max"):
+                val = retry_limits.get(limit_key)
+                if val is not None:
+                    try:
+                        int_val = int(val)
+                        if int_val < 1:
+                            errors.append(f"  [INVALID] retry_limits.{limit_key} must be >= 1, got '{val}'")
+                    except (ValueError, TypeError):
+                        errors.append(f"  [INVALID] retry_limits.{limit_key} must be a positive integer, got '{val}'")
 
     if errors:
         print(f"\nConfig validation FAILED ({len(errors)} error(s)):\n", file=sys.stderr)
@@ -96,7 +144,8 @@ def validate(config_path: str) -> bool:
     repo_name    = get_nested(cfg, "environment.repo_name")
     service_name = get_nested(cfg, "environment.service_name")
     project_key  = get_nested(cfg, "jira.project_key")
-    print(f"Config OK — repo={repo_owner}/{repo_name}  service={service_name}  jira={project_key}")
+    wf_label     = {"w1": "W1", "w2": "W2", "both": "W1+W2"}.get(workflow_type, workflow_type)
+    print(f"Config OK [{wf_label}] — repo={repo_owner}/{repo_name}  service={service_name}  jira={project_key}")
     return True
 
 

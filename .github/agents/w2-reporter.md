@@ -19,7 +19,7 @@ You: (1) create a GitHub PR, (2) compile the end-to-end report, (3) post it as a
 | @w2-context-builder | `REPORT_CONTEXT_FILE` |
 | Orchestrator | `FEATURE_BRANCH`, `JIRA_TICKET_ID`, `FIX_REPORT_PATH` |
 | Orchestrator | `GATE4_DECISION`, `GATE4_FEEDBACK`, `GATE8_DECISION`, `GATE8_REVIEW_COMMENTS` |
-| Orchestrator | `PLAN_REVISION_COUNT`, `BUILD_FAILURE_COUNT`, `VERIFY_FIX_COUNT`, `REVIEW_FIX_COUNT` |
+| Orchestrator | `PLAN_REVISION_ATTEMPTS`, `BUILD_FAILURE_ATTEMPTS`, `VERIFY_FIX_ATTEMPTS`, `REVIEW_FIX_ATTEMPTS` |
 | Orchestrator | `BUILD_FAILURE_DETAILS`, `VERIFY_ISSUES_DETAIL` |
 | @w2-fixer | `FIXES_APPLIED`, `FIXES_SKIPPED` |
 | @w2-validator | `VALIDATION_RESULTS`, `VALIDATION_STATUS` |
@@ -46,15 +46,19 @@ $PYTHON_CMD        = $cfg.tools.python
 $JIRA_SCRIPT       = Join-Path $REPO_ROOT ($cfg.scripts.jira_ticket_manager -replace '/', '\')
 $jiraSiteUrl       = $cfg.jira.site_url
 $GH_CMD            = $cfg.tools.gh
+$MAX_PLAN_REVISION = if ($null -ne $cfg.retry_limits -and $null -ne $cfg.retry_limits.plan_revision_max) { [int]$cfg.retry_limits.plan_revision_max } else { 3 }
+$MAX_BUILD_FAILURE = if ($null -ne $cfg.retry_limits -and $null -ne $cfg.retry_limits.build_failure_max) { [int]$cfg.retry_limits.build_failure_max } else { 3 }
+$MAX_VERIFY_FIX    = if ($null -ne $cfg.retry_limits -and $null -ne $cfg.retry_limits.verify_fix_max)    { [int]$cfg.retry_limits.verify_fix_max    } else { 3 }
+$MAX_REVIEW_FIX    = if ($null -ne $cfg.retry_limits -and $null -ne $cfg.retry_limits.review_fix_max)    { [int]$cfg.retry_limits.review_fix_max    } else { 3 }
 $FIX_REPORT_PATH          = "<FIX_REPORT_PATH>"
 $GATE4_DECISION           = "<GATE4_DECISION>"
 $GATE4_FEEDBACK           = "<GATE4_FEEDBACK>"
 $GATE8_DECISION           = "<GATE8_DECISION>"
 $GATE8_REVIEW_COMMENTS    = "<GATE8_REVIEW_COMMENTS>"
-$PLAN_REVISION_COUNT      = "<PLAN_REVISION_COUNT>"
-$BUILD_FAILURE_COUNT      = "<BUILD_FAILURE_COUNT>"
-$VERIFY_FIX_COUNT         = "<VERIFY_FIX_COUNT>"
-$REVIEW_FIX_COUNT         = "<REVIEW_FIX_COUNT>"
+$PLAN_REVISION_ATTEMPTS   = "<PLAN_REVISION_ATTEMPTS>"
+$BUILD_FAILURE_ATTEMPTS   = "<BUILD_FAILURE_ATTEMPTS>"
+$VERIFY_FIX_ATTEMPTS      = "<VERIFY_FIX_ATTEMPTS>"
+$REVIEW_FIX_ATTEMPTS      = "<REVIEW_FIX_ATTEMPTS>"
 $BUILD_FAILURE_DETAILS    = "<BUILD_FAILURE_DETAILS>"
 $VERIFY_ISSUES_DETAIL     = "<VERIFY_ISSUES_DETAIL>"
 
@@ -259,7 +263,7 @@ if (-not $SKIPPED_UNAPPROVED) { $SKIPPED_UNAPPROVED = "none" }
 $GATE4_BLOCK = @"
 ### Step 4 — Plan Approval
 - **Decision:** $GATE4_DECISION
-- **Revisions used:** $PLAN_REVISION_COUNT / 3
+- **Revisions used:** $PLAN_REVISION_ATTEMPTS / $MAX_PLAN_REVISION
 - **Feedback given (if any):**
   > $(if ($GATE4_FEEDBACK) { $GATE4_FEEDBACK } else { 'N/A' })
 "@
@@ -267,7 +271,7 @@ $GATE4_BLOCK = @"
 $GATE8_BLOCK = @"
 ### Step 8 — Implementation Review
 - **Decision:** $GATE8_DECISION
-- **Review fixes used:** $REVIEW_FIX_COUNT / 3
+- **Review fixes used:** $REVIEW_FIX_ATTEMPTS / $MAX_REVIEW_FIX
 - **Review comments (if any):**
   > $(if ($GATE8_REVIEW_COMMENTS) { $GATE8_REVIEW_COMMENTS } else { 'N/A' })
 "@
@@ -291,11 +295,11 @@ $(
     "| 1 | Context building (w2-context-builder) | ✅ Completed |",
     "| 2 | Feature branch creation | ✅ Created: $FEATURE_BRANCH |",
     "| 3 | Change plan generation (w2-planner) | ✅ Completed |",
-    "| 4 | Plan review | $(if ($GATE4_DECISION -eq 'approved') { '✅ Approved on first review' } elseif ($GATE4_DECISION -eq 'auto-approved') { '✅ Auto-approved by config flag' } elseif ($GATE4_DECISION -eq 'aborted') { '❌ Aborted by user' } else { "⚠️ $GATE4_DECISION — $PLAN_REVISION_COUNT revision(s) used" }) |",
-    "| 5 | Fix implementation + validation | $(if ([int]$BUILD_FAILURE_COUNT -gt 0) { "⚠️ Passed after $BUILD_FAILURE_COUNT build failure(s)" } else { '✅ Passed on first attempt' }) |",
-    "| 6 | Verification (w2-verifier) | $(if ([int]$VERIFY_FIX_COUNT -gt 0) { "⚠️ $VERIFICATION_RESULT after $VERIFY_FIX_COUNT fix cycle(s)" } else { "✅ $VERIFICATION_RESULT on first attempt" }) |",
-    "| 7 | Verification retry loop | $(if ([int]$VERIFY_FIX_COUNT -gt 0) { "🔁 $VERIFY_FIX_COUNT cycle(s) used" } else { '✅ No retries needed' }) |",
-    "| 8 | Human implementation review | $(if ($GATE8_DECISION -eq 'approved') { '✅ Approved' } elseif ($GATE8_DECISION -eq 'aborted') { '❌ Aborted by user' } elseif ($GATE8_DECISION -like '*N/A*') { 'N/A — not reached' } else { "⚠️ $GATE8_DECISION — $REVIEW_FIX_COUNT revision(s) used" }) |",
+    "| 4 | Plan review | $(if ($GATE4_DECISION -eq 'approved') { '✅ Approved on first review' } elseif ($GATE4_DECISION -eq 'auto-approved') { '✅ Auto-approved by config flag' } elseif ($GATE4_DECISION -eq 'aborted') { '❌ Aborted by user' } else { "⚠️ $GATE4_DECISION — $PLAN_REVISION_ATTEMPTS revision(s) used" }) |",
+    "| 5 | Fix implementation + validation | $(if ([int]$BUILD_FAILURE_ATTEMPTS -gt 0) { "⚠️ Passed after $BUILD_FAILURE_ATTEMPTS build failure(s)" } else { '✅ Passed on first attempt' }) |",
+    "| 6 | Verification (w2-verifier) | $(if ([int]$VERIFY_FIX_ATTEMPTS -gt 0) { "⚠️ $VERIFICATION_RESULT after $VERIFY_FIX_ATTEMPTS fix cycle(s)" } else { "✅ $VERIFICATION_RESULT on first attempt" }) |",
+    "| 7 | Verification retry loop | $(if ([int]$VERIFY_FIX_ATTEMPTS -gt 0) { "🔁 $VERIFY_FIX_ATTEMPTS cycle(s) used" } else { '✅ No retries needed' }) |",
+    "| 8 | Human implementation review | $(if ($GATE8_DECISION -eq 'approved') { '✅ Approved' } elseif ($GATE8_DECISION -eq 'aborted') { '❌ Aborted by user' } elseif ($GATE8_DECISION -like '*N/A*') { 'N/A — not reached' } else { "⚠️ $GATE8_DECISION — $REVIEW_FIX_ATTEMPTS revision(s) used" }) |",
     "| 9 | PR creation + Jira update | ✅ $PR_URL |"
   )
   $timelineLines -join "`n"
@@ -335,10 +339,10 @@ $COVERAGE_SUMMARY
 ---
 
 ## 5. Retry Counters
-- Plan revisions: $PLAN_REVISION_COUNT / 3
-- Build failures: $BUILD_FAILURE_COUNT / 3
-- Verify fixes: $VERIFY_FIX_COUNT / 3
-- Review fixes: $REVIEW_FIX_COUNT / 3
+- Plan revisions: $PLAN_REVISION_ATTEMPTS / $MAX_PLAN_REVISION
+- Build failures: $BUILD_FAILURE_ATTEMPTS / $MAX_BUILD_FAILURE
+- Verify fixes: $VERIFY_FIX_ATTEMPTS / $MAX_VERIFY_FIX
+- Review fixes: $REVIEW_FIX_ATTEMPTS / $MAX_REVIEW_FIX
 
 ---
 

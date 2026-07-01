@@ -43,8 +43,12 @@ JIRA_EMAIL=your@email.com
 JIRA_API_TOKEN=your-api-token
 ```
 
-**3. Fill in required fields in `.github/config/ghas-workflow-config.yml`**
+**3. Fill in required fields in the workflow config files**
 
+- **Workflow 1** (alert ingestion): `.github/config/ghas-w1-config.yml`
+- **Workflow 2** (vulnerability resolver): `.github/config/ghas-w2-config.yml`
+
+Both files share this core block:
 ```yaml
 environment:
   repo_owner: <github-org-or-username>
@@ -59,7 +63,8 @@ jira:
 
 Validate:
 ```bash
-python .github/scripts/validate_config.py .github/config/ghas-workflow-config.yml
+python .github/scripts/validate_config.py .github/config/ghas-w1-config.yml
+python .github/scripts/validate_config.py .github/config/ghas-w2-config.yml
 ```
 
 **4. Open the project in Claude Code**
@@ -110,7 +115,7 @@ On `approve` at both gates, the agent pushes the branch, opens a GitHub PR, post
 |---------|-----|
 | `gh auth status` missing `security_events` | Re-run `gh auth login` with a PAT that includes `security_events` and `repo` scopes |
 | `dependabot/alerts` returns 404 | Enable GHAS: GitHub repo → Settings → Security → Code security |
-| `validate_config.py` fails | Fill in the missing field it names in `ghas-workflow-config.yml` |
+| `validate_config.py` fails | Fill in the missing field it names in `ghas-w1-config.yml` or `ghas-w2-config.yml` |
 | Jira 401 Unauthorized | Check `JIRA_EMAIL` and `JIRA_API_TOKEN` in `.env` |
 | Workflow 2 aborts "Uncommitted changes" | `git stash` or commit the changes, then re-run |
 | `gh pr create` permission denied | Re-authenticate `gh auth login` with a PAT that has `repo` write scope |
