@@ -36,7 +36,18 @@ Four counters, max attempts loaded from `retry_limits` in `ghas-w2-config.yml` (
 
 - **Jira ticket ID** (e.g. `HMS-16`) — everything else comes from config.
 
-If not provided, search Jira: `project = "$JIRA_PROJECT" AND labels = "$BASE_LABEL" AND labels = "$SERVICE_NAME" AND statusCategory in ("$OPEN_STATUSES")`. Use the most recent result. If zero results → stop.
+**Before doing anything else**, use `ask_user` to prompt for the ticket ID:
+
+```
+ask_user(
+  question: "Enter the Jira ticket ID to resolve (e.g. HMS-16):",
+  allow_freeform: true
+)
+```
+
+Wait for the response. If the user provides no input or cancels → stop: "No ticket ID provided — workflow aborted."
+
+Do NOT auto-search Jira or proceed to Step 0 until a ticket ID is explicitly provided by the user.
 
 ---
 
