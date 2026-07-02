@@ -23,6 +23,7 @@ $REPO_ROOT     = "<REPO_ROOT>"
 $GIT_BASH      = "<GIT_BASH>"
 $BUILD_TOOL    = "<BUILD_TOOL>"
 $MVN_CMD       = "<MVN_CMD>"
+$GRADLE_CMD    = "<GRADLE_CMD>"
 $TEST_CMD      = "<TEST_CMD>"
 $SMOKE_URL     = "<SMOKE_URL>"
 $SMOKE_TIMEOUT = "<SMOKE_TIMEOUT>"
@@ -34,6 +35,9 @@ $SAFE_SVC      = $SERVICE_NAME -replace '[^a-zA-Z0-9]', '-'
 if ($START_CMD_CFG -and $START_CMD_CFG -ne '') {
     $SMOKE_START_FILE = $GIT_BASH
     $SMOKE_START_ARGS = @('-c', $START_CMD_CFG)
+} elseif ($BUILD_TOOL -eq 'gradle') {
+    $SMOKE_START_FILE = $GRADLE_CMD
+    $SMOKE_START_ARGS = @('bootRun')
 } else {
     $SMOKE_START_FILE = $MVN_CMD
     $SMOKE_START_ARGS = @('spring-boot:run')
@@ -52,10 +56,16 @@ Use `$MVN_CMD` everywhere — not hardcoded `mvn`.
 ### 1. Dependency Tree Check
 
 ```powershell
-& $MVN_CMD dependency:tree -Dincludes=<groupId>:<artifactId> -q
+if ($BUILD_TOOL -eq 'gradle') {
+    & $GRADLE_CMD dependencies --configuration runtimeClasspath
+} else {
+    & $MVN_CMD dependency:tree -Dincludes=<groupId>:<artifactId> -q
+}
 ```
 
-If old vulnerable version still appears (transitive pull): add a `<dependencyManagement>` override and re-run to confirm.
+If old vulnerable version still appears (transitive pull):
+- **Maven**: add a `<dependencyManagement>` override and re-run to confirm.
+- **Gradle**: add a `resolutionStrategy.force` or `constraints` block and re-run to confirm.
 
 On failure:
 ```
@@ -63,7 +73,7 @@ FAILURE_CONTEXT:
   Step    : dependency_tree
   Error   : <first 20 lines>
   Suspect : <package>
-  Detail  : dependency:tree command exited non-zero
+  Detail  : dependency tree check exited non-zero
 ```
 Stop — do NOT continue to Step 2.
 
@@ -72,7 +82,8 @@ Stop — do NOT continue to Step 2.
 ### 2. Compile Check
 
 ```powershell
-& $MVN_CMD compile
+if ($BUILD_TOOL -eq 'gradle') { & $GRADLE_CMD compileJava }
+else { & $MVN_CMD compile }
 ```
 
 On failure:
@@ -209,6 +220,6 @@ VALIDATION_STATUS: failed
 ## Rules
 - Never revert any fix
 - Stop immediately on any failure — do not run further steps
-- Always re-run `dependency:tree` after adding a `<dependencyManagement>` override
+- Always re-run the dependency tree check after adding an override (`<dependencyManagement>` for Maven, `resolutionStrategy.force` for Gradle)
 - `passed` only when all four steps complete without error
 - Always emit `SMOKE_STATUS: passed | skipped | failed` as a separate field — `VALIDATION_STATUS: passed` does NOT imply the smoke check ran

@@ -109,6 +109,11 @@ $PAGE_SIZE         = $cfg.workflow2.dependabot_api_page_size
 $BUILD_TOOL        = $cfg.workflow2.build_tool
 $TEST_CMD          = $cfg.workflow2.test_command
 $START_CMD_CFG     = $cfg.workflow2.start_command
+$GRADLE_CMD        = Join-Path $REPO_ROOT ($cfg.workflow2.gradle_path -replace '/', '\')
+# null start_command → auto-detect from build_tool
+if (-not $START_CMD_CFG) {
+    $START_CMD_CFG = if ($BUILD_TOOL -eq 'gradle') { 'bootRun' } else { 'spring-boot:run' }
+}
 $DEP_GROUPS_JSON   = ($cfg.dependency_groups | ConvertTo-Json -Compress -Depth 5)
 $MAX_PLAN_REVISION = if ($null -ne $cfg.retry_limits -and $null -ne $cfg.retry_limits.plan_revision_max) { [int]$cfg.retry_limits.plan_revision_max } else { 3 }
 $MAX_BUILD_FAILURE = if ($null -ne $cfg.retry_limits -and $null -ne $cfg.retry_limits.build_failure_max) { [int]$cfg.retry_limits.build_failure_max } else { 3 }
@@ -136,7 +141,7 @@ If this step fails → stop immediately.
 
 ## Step 1 — @w2-context-builder
 
-Pass: `$REPO_OWNER`, `$REPO_NAME`, `$REPO_ROOT`, `$SERVICE_NAME`, `$GIT_BASH`, `$PYTHON_CMD`, `$GH_CMD`, `$MANIFEST_PATH`, `$SOURCE_ROOT`, `$CSV_GLOB_PATH`, `$BUILD_TOOL`, `$PAGE_SIZE`, `$AUTO_MINOR`, `$AUTO_CRITICAL`, `$CONFIG_PATH`, `JIRA_TICKET_ID`.
+Pass: `$REPO_OWNER`, `$REPO_NAME`, `$REPO_ROOT`, `$SERVICE_NAME`, `$GIT_BASH`, `$PYTHON_CMD`, `$GH_CMD`, `$MANIFEST_PATH`, `$SOURCE_ROOT`, `$CSV_GLOB_PATH`, `$BUILD_TOOL`, `$GRADLE_CMD`, `$PAGE_SIZE`, `$AUTO_MINOR`, `$AUTO_CRITICAL`, `$CONFIG_PATH`, `JIRA_TICKET_ID`.
 
 Capture: `FIX_CONTEXT` (sections A–E), `REPORT_CONTEXT_FILE` (path on disk), `CONTEXT_MAP_FILE` (debug path).
 
@@ -245,12 +250,12 @@ ATTEMPT = 1
 **Loop:**
 
 ### 5a — @w2-fixer
-Pass: `$REPO_ROOT`, `$MANIFEST_PATH`, `$MVN_CMD`, `$GIT_BASH`, `$PYTHON_CMD`, `$CONFIG_PATH`, `FIX_CONTEXT`, `APPROVED_FIXES`, `FAILURE_CONTEXT`, `ATTEMPT`.
+Pass: `$REPO_ROOT`, `$MANIFEST_PATH`, `$MVN_CMD`, `$GRADLE_CMD`, `$BUILD_TOOL`, `$GIT_BASH`, `$PYTHON_CMD`, `$CONFIG_PATH`, `FIX_CONTEXT`, `APPROVED_FIXES`, `FAILURE_CONTEXT`, `ATTEMPT`.
 
 Capture: `FIXES_APPLIED`, `FIXES_SKIPPED`.
 
 ### 5b — @w2-validator
-Pass: `$REPO_ROOT`, `$MANIFEST_PATH`, `$MVN_CMD`, `$GIT_BASH`, `$BUILD_TOOL`, `$TEST_CMD`, `$START_CMD_CFG`, `$SERVICE_NAME`, `$SMOKE_URL`, `$SMOKE_TIMEOUT`, `$HTTP_TIMEOUT`, `FIXES_APPLIED`.
+Pass: `$REPO_ROOT`, `$MANIFEST_PATH`, `$MVN_CMD`, `$GRADLE_CMD`, `$GIT_BASH`, `$BUILD_TOOL`, `$TEST_CMD`, `$START_CMD_CFG`, `$SERVICE_NAME`, `$SMOKE_URL`, `$SMOKE_TIMEOUT`, `$HTTP_TIMEOUT`, `FIXES_APPLIED`.
 
 Capture: `VALIDATION_RESULTS`, `VALIDATION_STATUS`, `FAILURE_CONTEXT`.
 
@@ -279,7 +284,7 @@ Else: ATTEMPT++ → loop back to Step 5a
 
 ## Step 6 — @w2-verifier
 
-Pass: `$REPO_ROOT`, `$MANIFEST_PATH`, `$SOURCE_ROOT`, `$MVN_CMD`, `$GIT_BASH`, `$PYTHON_CMD`, `$JIRA_SITE_URL`, `$CONFIG_PATH`, `$DEP_GROUPS_JSON`, `FIX_CONTEXT`, `JIRA_TICKET_ID`, `FEATURE_BRANCH`, `VALIDATION_RESULTS`.
+Pass: `$REPO_ROOT`, `$MANIFEST_PATH`, `$SOURCE_ROOT`, `$MVN_CMD`, `$GRADLE_CMD`, `$BUILD_TOOL`, `$GIT_BASH`, `$PYTHON_CMD`, `$JIRA_SITE_URL`, `$CONFIG_PATH`, `$DEP_GROUPS_JSON`, `FIX_CONTEXT`, `JIRA_TICKET_ID`, `FEATURE_BRANCH`, `VALIDATION_RESULTS`.
 
 Capture: `VERIFICATION_RESULT` (`passed` / `issues_found`), `ISSUES`, `COVERAGE_SUMMARY`.
 
@@ -326,15 +331,20 @@ Wait for the user's response before proceeding. Do NOT continue to Step 9 withou
 - Stage changes only (do NOT commit — user handles all git commits):
   ```powershell
   Set-Location $REPO_ROOT
-  $modifiedPoms = (& $GIT_BASH -c "git diff --name-only") -split '\r?\n' |
-      Where-Object { $_ -match 'pom\.xml$' }
-  if (-not $modifiedPoms) {
-      Write-Host "WARNING: No pom.xml changes detected — nothing to stage"
+  $modifiedManifests = (& $GIT_BASH -c "git diff --name-only") -split '\r?\n' | Where-Object {
+      if ($BUILD_TOOL -eq 'gradle') {
+          $_ -match '\.gradle(\.kts)?$|gradle\.properties$|libs\.versions\.toml$'
+      } else {
+          $_ -match 'pom\.xml$'
+      }
+  }
+  if (-not $modifiedManifests) {
+      Write-Host "WARNING: No manifest changes detected — nothing to stage"
   } else {
-      Write-Host "Staging modified pom.xml files:"
-      $modifiedPoms | ForEach-Object { Write-Host "  $_" }
-      $pomList = ($modifiedPoms | ForEach-Object { """$_""" }) -join ' '
-      & $GIT_BASH -c "git add $pomList"
+      Write-Host "Staging modified manifest files ($BUILD_TOOL):"
+      $modifiedManifests | ForEach-Object { Write-Host "  $_" }
+      $fileList = ($modifiedManifests | ForEach-Object { """$_""" }) -join ' '
+      & $GIT_BASH -c "git add $fileList"
       Write-Host "Files staged. Skipping git commit — user handles committing."
   }
   ```

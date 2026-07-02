@@ -121,6 +121,8 @@ Fetches all open GHAS alerts, groups by service, creates/updates one Jira ticket
 
 Note the Jira ticket ID from the output (e.g. `HMS-16`) — needed for Workflow 2.
 
+> ⚠️ The completion output templates in `alert-ingestion-orchestrator.md`, `w1-jira-manager.md`, and `w1-fetcher.md` use `HMS` / `HMS-XX` as literal illustrative examples (e.g. `Jira tickets created : <N> → [HMS-XX, ...]`) instead of generic placeholders like `<SERVICE_NAME>` / `<PROJECT_KEY>-XX`. Real runs still substitute your actual service name and ticket keys correctly — this only affects how the templates read as documentation on a different project.
+
 ---
 
 ## Running Workflow 2 — Vulnerability Resolver

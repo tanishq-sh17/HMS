@@ -27,8 +27,9 @@ If `FEEDBACK` is provided, regenerate the plan incorporating it and note each ad
 $REPO_ROOT     = "<REPO_ROOT>"
 $SOURCE_ROOT   = "<SOURCE_ROOT>"
 $MANIFEST_PATH = "<MANIFEST_PATH>"
+$BUILD_TOOL    = "<BUILD_TOOL>"
 
-Write-Host "Variables loaded: source_root=$SOURCE_ROOT  manifest=$MANIFEST_PATH"
+Write-Host "Variables loaded: source_root=$SOURCE_ROOT  manifest=$MANIFEST_PATH  build=$BUILD_TOOL"
 ```
 
 ---
@@ -105,12 +106,29 @@ Proposed action: <Strategy A / B / C> — <one-line description>
 
 ### 3. Proposed Manifest Diff (read-only — do NOT apply)
 
+For **Maven** (`BUILD_TOOL = maven`) — show XML diff:
 ```
---- manifest (current)
-+++ manifest (proposed)
+--- pom.xml (current)
++++ pom.xml (proposed)
 @@ ... @@
 -  <log4j.version>2.14.1</log4j.version>
 +  <log4j.version>2.17.2</log4j.version>
+... (one hunk per fix, ±3 lines of context)
+```
+
+For **Gradle** (`BUILD_TOOL = gradle`) — show DSL diff matching the actual file format:
+```
+--- gradle.properties (current)          # property-backed example
++++ gradle.properties (proposed)
+@@ ... @@
+-log4j.version=2.14.1
++log4j.version=2.17.2
+
+--- build.gradle (current)               # inline example
++++ build.gradle (proposed)
+@@ ... @@
+-    implementation 'org.apache.logging.log4j:log4j-core:2.14.1'
++    implementation 'org.apache.logging.log4j:log4j-core:2.17.2'
 ... (one hunk per fix, ±3 lines of context)
 ```
 

@@ -35,6 +35,7 @@ $cfgJson = python -c "import yaml,json,sys; print(json.dumps(yaml.safe_load(open
 $cfg = $cfgJson | ConvertFrom-Json
 
 $SERVICE_NAME      = $cfg.environment.service_name
+$BUILD_TOOL        = $cfg.workflow2.build_tool
 $GIT_BASH          = $cfg.tools.git_bash
 $REPO_OWNER        = $cfg.environment.repo_owner
 $REPO_NAME         = $cfg.environment.repo_name
@@ -103,10 +104,10 @@ $FIXES_TABLE_ROWS
 
 | Check | Result |
 |-------|--------|
-| dependency:tree | ✅/❌ |
-| compile         | ✅/❌ |
-| tests           | ✅/❌ |
-| smoke check     | ✅/❌ |
+| $( if ($BUILD_TOOL -eq 'gradle') { 'dependencies task' } else { 'dependency:tree' } ) | ✅/❌ |
+| $( if ($BUILD_TOOL -eq 'gradle') { 'compileJava' } else { 'compile' } ) | ✅/❌ |
+| tests       | ✅/❌ |
+| smoke check | ✅/❌ |
 
 ## Verification
 
@@ -170,8 +171,8 @@ Skipped — BOM-managed: <list or "none">
 ────────────────────────────────────────────────────────────────────
 | Check           | Result |
 |-----------------|--------|
-| dependency:tree | ✅/❌  |
-| compile         | ✅/❌  |
+| dependency:tree / dependencies task (Maven/Gradle) | ✅/❌  |
+| compile / compileJava (Maven/Gradle)               | ✅/❌  |
 | test            | ✅/❌  |
 | smoke check     | ✅/❌  |
 
@@ -193,7 +194,7 @@ Coverage: Tests run: X  |  Failures: X  |  Errors: X  |  Coverage: X% / N/A
   Verification result       : <passed | issues_found>
   Code Scanning alerts      : X (not auto-fixed — require manual code changes)
   Secret Scanning alerts    : X (not auto-fixed — require secret rotation)
-  pom.xml final state       : ✅ compiles and tests pass / ⚠️ partial fixes only
+  manifest final state      : ✅ compiles and tests pass / ⚠️ partial fixes only
 ────────────────────────────────────────────────────────────────────
 ```
 

@@ -1,5 +1,5 @@
 ---
-description: Workflow 2 / Sub-Agent 1 — Fetches the latest open Dependabot alerts for a service using gh CLI, reads the latest github_alerts_*.csv for enriched compliance context, reads pom.xml, classifies each dependency version type, and audits sibling group consistency.
+description: Workflow 2 / Sub-Agent 1 — Fetches the latest open Dependabot alerts for a service using gh CLI, reads the latest github_alerts_*.csv for enriched compliance context, reads manifest files (pom.xml for Maven, build.gradle/gradle.properties/libs.versions.toml for Gradle), classifies each dependency version type, and audits sibling group consistency.
 model: claude-haiku-4-5-20251001
 tools:
   - powershell
@@ -31,6 +31,7 @@ $MANIFEST_PATH = "<MANIFEST_PATH>"
 $SOURCE_ROOT   = "<SOURCE_ROOT>"
 $CSV_GLOB      = "<CSV_GLOB_PATH>"
 $BUILD_TOOL    = "<BUILD_TOOL>"
+$GRADLE_CMD    = "<GRADLE_CMD>"
 $PAGE_SIZE     = "<PAGE_SIZE>"
 $AUTO_MINOR    = "<AUTO_MINOR>"
 $AUTO_CRITICAL = "<AUTO_CRITICAL>"
@@ -121,20 +122,33 @@ If CSV not found → log `[WARN] No CSV — continuing with gh CLI data only` an
 
 ---
 
-### 3. Discover and Read All pom.xml Files
+### 3. Discover and Read All Manifest Files
 
 ```powershell
-$pomFiles = Get-ChildItem $REPO_ROOT -Recurse -Filter "pom.xml" |
-    Where-Object { $_.FullName -notlike "*\target\*" } |
-    Select-Object -ExpandProperty FullName
-Write-Host "Found $($pomFiles.Count) pom.xml file(s):"
-$pomFiles | ForEach-Object { Write-Host "  $_" }
+if ($BUILD_TOOL -eq 'gradle') {
+    $buildFiles   = Get-ChildItem $REPO_ROOT -Recurse -Include "build.gradle","build.gradle.kts" |
+        Where-Object { $_.FullName -notlike "*\build\*" } |
+        Select-Object -ExpandProperty FullName
+    $propsFiles   = Get-ChildItem $REPO_ROOT -Recurse -Filter "gradle.properties" |
+        Where-Object { $_.FullName -notlike "*\build\*" } |
+        Select-Object -ExpandProperty FullName
+    $catalogFiles = Get-ChildItem $REPO_ROOT -Recurse -Filter "libs.versions.toml" |
+        Select-Object -ExpandProperty FullName
+    $manifestFiles = @($buildFiles) + @($propsFiles) + @($catalogFiles)
+    Write-Host "Found $($buildFiles.Count) build.gradle file(s), $($propsFiles.Count) gradle.properties, $($catalogFiles.Count) version catalog(s)"
+} else {
+    $manifestFiles = Get-ChildItem $REPO_ROOT -Recurse -Filter "pom.xml" |
+        Where-Object { $_.FullName -notlike "*\target\*" } |
+        Select-Object -ExpandProperty FullName
+    Write-Host "Found $($manifestFiles.Count) pom.xml file(s)"
+}
+$manifestFiles | ForEach-Object { Write-Host "  $_" }
 ```
 
 Read every file in full — do NOT truncate:
 
 ```powershell
-$pomFiles | ForEach-Object {
+$manifestFiles | ForEach-Object {
     $label = if ($_ -eq $MANIFEST_PATH) { "(root)" } else { "(module)" }
     Write-Host "=== $_ $label ==="
     Get-Content $_ -Raw
@@ -142,13 +156,15 @@ $pomFiles | ForEach-Object {
 }
 ```
 
-`$MANIFEST_PATH` is the root pom.xml. All discovered files may be edited by @w2-fixer.
+`$MANIFEST_PATH` is the root manifest. All discovered files may be edited by @w2-fixer.
 
 ---
 
 ### 4. Classify Each Vulnerable Dependency
 
-For each alert from Step 1, search **all discovered pom.xml files** for a matching `<dependency>` block. Record the exact file path where the version is declared — @w2-fixer uses this path.
+For each alert from Step 1, search **all discovered manifest files** for a matching dependency declaration. Record the exact file path where the version is declared — @w2-fixer uses this path.
+
+**Maven** (`BUILD_TOOL = maven`):
 
 | Type | How to identify | Fix strategy |
 |---|---|---|
@@ -156,19 +172,35 @@ For each alert from Step 1, search **all discovered pom.xml files** for a matchi
 | **Property-backed** | `<version>${some.property}</version>` | Update property in `<properties>` block of whichever file defines it |
 | **BOM-managed** | No `<version>` tag in `<dependency>` | SKIP |
 
+**Gradle** (`BUILD_TOOL = gradle`):
+
+| Type | How to identify | Fix strategy |
+|---|---|---|
+| **Inline** | `'group:artifact:1.0.0'` or `"group:artifact:1.0.0"` in build.gradle | Update version string in that file |
+| **Property-backed (ext block)** | `ext { someVersion = '1.0.0' }` then `$someVersion` in dependency | Update value in ext block |
+| **Property-backed (gradle.properties)** | `some.version=1.0.0` in gradle.properties | Update value in gradle.properties |
+| **Version catalog** | `[versions]` entry in libs.versions.toml | Update entry in libs.versions.toml |
+| **BOM/platform** | `platform(...)` or `enforcedPlatform(...)` import | SKIP |
+
 **CVE deduplication:** Collapse multiple CVEs for the same package into one entry. Use the highest required safe version.
 
-Example entry:
+Example entry (Maven):
 ```
 [HIGH] jackson-databind — property(jackson.version) — 2.13.2 → 2.14.2 — CVE-2020-36518, CVE-2022-42003, CVE-2022-42004
   Declared in: pom.xml (root)
+```
+
+Example entry (Gradle):
+```
+[HIGH] jackson-databind — property(jacksonVersion in gradle.properties) — 2.13.2 → 2.14.2 — CVE-2020-36518
+  Declared in: gradle.properties
 ```
 
 ---
 
 ### 5. Sibling Consistency Audit
 
-For each group in `$DEP_GROUPS`, search **all discovered pom.xml files** for each listed artifact and verify they share the same version.
+For each group in `$DEP_GROUPS`, search **all discovered manifest files** for each listed artifact and verify they share the same version.
 
 ```powershell
 $DEP_GROUPS | ForEach-Object {
@@ -190,9 +222,9 @@ CONTEXT MAP
 ─────────────────────────────────────────
 Repo         : $REPO_OWNER/$REPO_NAME
 Jira ticket  : <JIRA_TICKET_ID>
-Manifests    : <list all discovered pom.xml paths>
+Manifests    : <list all discovered manifest file paths>
   Root       : <MANIFEST_PATH>
-  Modules    : <path1>, <path2>, ...
+  Others     : <path1>, <path2>, ...
 
 Build config:
   build_tool           : $BUILD_TOOL
@@ -216,7 +248,7 @@ Write-Host "CONTEXT_MAP_FILE: $contextMapFile"
 ```
 
 Emit **FIX_CONTEXT** inline (superset — for @w2-planner, @w2-fixer, @w2-verifier):
-- Section A: repo root, manifest root path, source root, all discovered pom.xml paths
+- Section A: repo root, manifest root path, source root, all discovered manifest file paths
 - Section B: build config (build_tool, auto_approve_minor, auto_approve_critical)
 - Section C: full fix plan sorted by severity, each entry with `Declared in:` path, artifact/old-ver/safe-ver/CVEs/upgrade type
 - Section D: BOM-managed skips

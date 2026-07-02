@@ -57,7 +57,7 @@ def load_config():
             "parent_jira": None,
             "story_points": None,
             "team": None,
-            "priority": "High",
+            "priority": None,
             "template": {"include_columns": ["ghsa_id", "cve_id", "title"]},
             "skip_statuses_for_duplicate_check": [
                 "To Do", "Funnel", "Analysis", "In Dev", "Blocked", "On Hold"
@@ -344,7 +344,7 @@ def build_adf_description(service_name, grouped_alerts):
                 continue
             content.append(_para(_strong_text(f"{sev.capitalize()}:")))
             header = _table_row([
-                {"type": "tableHeader", "content": [_para(_text(COL_MAP[c]))]}
+                _table_header_cell(COL_MAP[c])
                 for c in active_cols
             ])
             rows = [header]
@@ -377,14 +377,12 @@ def build_adf_description(service_name, grouped_alerts):
                 continue
             content.append(_para(_strong_text(f"{sev.capitalize()}:")))
             header = _table_row([
-                {"type": "tableHeader", "content": [_para(_text("Title"))]},
-                {"type": "tableHeader", "content": [_para(_text("URL"))]},
+                _table_header_cell("Title"),
             ])
             rows = [header]
             for a in bucket:
                 rows.append(_table_row([
                     _table_cell(a.get("title") or "—"),
-                    _table_cell(a.get("url") or "—"),
                 ]))
             content.append({
                 "type": "table",
@@ -399,10 +397,6 @@ def build_adf_description(service_name, grouped_alerts):
             content.append(_para(_text(f"• {a.get('title','—')} | {a.get('url','—')}")))
 
     content.append({"type": "rule"})
-    content.append(_para({
-        "type": "text", "text": "Auto-created by GHAS Vulnerability Management — Workflow 1 / Jira Manager",
-        "marks": [{"type": "em"}],
-    }))
 
     return {"version": 1, "type": "doc", "content": content}
 
@@ -459,9 +453,9 @@ def cmd_create(args):
     sev_parts       = [f"{k.capitalize()}-{v}" for k, v in sev_totals.items() if v > 0]
     severity_summary = ", ".join(sev_parts)
 
-    # Priority — read from config (set by business, not severity-mapped)
+    # Priority — read from config (set by business, not severity-mapped); None = don't set
     jira_cfg = get_jira_config()
-    priority = jira_cfg.get("priority", "High")
+    priority = jira_cfg.get("priority")
 
     # Ticket summary — read template from config, fall back to built-in default
     summary_template = jira_cfg.get(
@@ -470,9 +464,10 @@ def cmd_create(args):
     )
     summary = summary_template.format(service_name=args.service, severity_summary=severity_summary)
 
-    # Labels — base from config + service name appended
-    base_labels = list(jira_cfg.get("labels", ["GHAS"]))
-    labels = base_labels + [args.service]
+    # Labels — config labels + service name always appended for duplicate detection
+    labels = list(jira_cfg.get("labels", ["GHAS"]))
+    if args.service and args.service not in labels:
+        labels.append(args.service)
 
     # ADF description
     adf_desc = build_adf_description(args.service, alerts)
@@ -482,24 +477,32 @@ def cmd_create(args):
             "project":     {"key": args.project},
             "issuetype":   {"name": jira_cfg.get("issue_type", "Bug")},
             "summary":     summary,
-            "priority":    {"name": priority},
             "labels":      labels,
             "description": adf_desc,
         }
     }
 
-    # Optional fields from config
+    # Optional fields — only added when explicitly set in config (not None)
+    if priority:
+        payload["fields"]["priority"] = {"name": priority}
+
     assignee     = jira_cfg.get("assignee")
     story_points = jira_cfg.get("story_points")
+    team         = jira_cfg.get("team")
     parent_jira  = jira_cfg.get("parent_jira")
 
     if assignee:
         payload["fields"]["assignee"] = {"accountId": assignee}
-    # story_points is a Jira custom field — the field ID varies per instance (e.g. customfield_10016).
-    # Set jira.story_points_field in config to the correct field ID for your Jira board.
+    # story_points field ID varies per Jira instance (e.g. customfield_10016).
+    # Set jira.story_points_field in config to the correct field ID for your board.
     if story_points is not None:
-        story_points_field = jira_cfg.get("story_points_field", "story_points")
+        story_points_field = jira_cfg.get("story_points_field", "customfield_10016")
         payload["fields"][story_points_field] = story_points
+    # team field ID varies per Jira instance (e.g. customfield_10014).
+    # Set jira.team_field in config to the correct field ID for your board.
+    if team:
+        team_field = jira_cfg.get("team_field", "customfield_10014")
+        payload["fields"][team_field] = {"name": team}
     if parent_jira:
         payload["fields"]["parent"] = {"key": parent_jira}
 
@@ -512,7 +515,10 @@ def cmd_create(args):
 
     data = resp.json()
     key  = data.get("key", "")
-    print(json.dumps({"key": key, "summary": summary, "priority": priority}))
+    result = {"key": key, "summary": summary}
+    if priority:
+        result["priority"] = priority
+    print(json.dumps(result))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -184,6 +184,27 @@ Capture `TICKETS_AUTO_CLOSED`. Emit: `✅ Step 2b — Closed <N> resolved ticket
 ╚══════════════════════════════════════════════════════╝
 ```
 
+---
+
+## Step 3 — Offer to Run Workflow 2
+
+After printing the Final Output, use `ask_user` to prompt:
+
+```
+Workflow 1 complete. Would you like to run Workflow 2 (Vulnerability Resolver) now?
+
+  Tickets available for remediation: <list each CREATED/UPDATED ticket as "HMS-XX — <summary>">
+
+  → yes   Run Workflow 2 now (you will be asked for the Jira ticket ID)
+  → no    Stop here — you can run Workflow 2 later with the ticket ID above
+```
+
+- If the user says **yes**: ask which ticket ID to start with (if more than one was created/updated), then hand off to the vuln-resolver-orchestrator with that ticket ID.
+- If the user says **no**: acknowledge and stop. Remind them to run Workflow 2 with the ticket ID shown above.
+- If **no tickets** were created or updated (all skipped or zero-alert): skip this prompt entirely — there is nothing to remediate.
+
+---
+
 ## Rules
 - Spawn sub-agents with `agent_type: "general-purpose"` — never use custom agent types
 - Never proceed to the next sub-agent if the current one reports a failure

@@ -54,9 +54,11 @@ jira:
   assignee: null                    # Jira accountId string, or null for unassigned
   parent_jira: null                 # Parent epic key (e.g. HMS-5), or null. When set: (1) attached as parent on new tickets, (2) added to duplicate-search JQL. Null = search all epics.
   search_labels: null               # Labels that must ALL appear on a ticket to match duplicate search. Null = defaults to jira.labels.
-  story_points: null                # Story points for new tickets (set to null if field not on screen)
-  team: null                        # Team name, or null to leave blank
-  priority: High                    # Ticket priority — set by business, not mapped per severity
+  story_points: null                # Story points for new tickets (null = field not sent)
+  story_points_field: customfield_10016  # Jira custom field ID for story points (varies per instance)
+  team: null                        # Team name, or null to leave blank (null = field not sent)
+  team_field: customfield_10014     # Jira custom field ID for team (varies per instance)
+  priority: High                    # Ticket priority — set by business, not mapped per severity; null = field not sent
   issue_type: Bug                   # Jira issue type (Bug / Task / Story / Security Finding)
 
   # Template for the ticket summary (title) line.

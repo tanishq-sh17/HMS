@@ -25,6 +25,7 @@ $REPO_ROOT     = "<REPO_ROOT>"
 $MANIFEST_PATH = "<MANIFEST_PATH>"
 $SOURCE_ROOT   = "<SOURCE_ROOT>"
 $MVN_CMD       = "<MVN_CMD>"
+$GRADLE_CMD    = "<GRADLE_CMD>"
 $GIT_BASH      = "<GIT_BASH>"
 $PYTHON_CMD    = "<PYTHON_CMD>"
 $JIRA_SCRIPT   = "<JIRA_SCRIPT>"
@@ -32,7 +33,7 @@ $CONFIG_PATH   = "<CONFIG_PATH>"
 $DEP_GROUPS    = "<DEP_GROUPS_JSON>" | ConvertFrom-Json
 $BUILD_TOOL    = "<BUILD_TOOL>"
 $JACOCO_XML    = Join-Path $REPO_ROOT (if ($BUILD_TOOL -eq 'gradle') { 'build\reports\jacoco\test\jacocoTestReport.xml' } else { 'target\site\jacoco\jacoco.xml' })
-Write-Host "Variables loaded: manifest=$MANIFEST_PATH"
+Write-Host "Variables loaded: manifest=$MANIFEST_PATH  build=$BUILD_TOOL"
 ```
 
 ---
@@ -65,22 +66,29 @@ If `get` exits non-zero → log `[WARN] Jira unreachable — skipping cross-chec
 
 ### 2. Validate All CVEs Are Addressed in Manifest
 
-Check **all** discovered pom.xml files, not just the root — fixes applied to child modules would otherwise be reported as false negatives.
+Check **all** discovered manifest files, not just the root — fixes applied to child modules would otherwise be reported as false negatives.
 
 ```powershell
-$pomFiles = Get-ChildItem $REPO_ROOT -Recurse -Filter "pom.xml" |
-    Where-Object { $_.FullName -notlike "*\target\*" } |
-    Select-Object -ExpandProperty FullName
-Write-Host "Checking $($pomFiles.Count) pom.xml file(s) for safe versions"
+if ($BUILD_TOOL -eq 'gradle') {
+    $manifestFiles = Get-ChildItem $REPO_ROOT -Recurse -Include "build.gradle","build.gradle.kts","gradle.properties","libs.versions.toml" |
+        Where-Object { $_.FullName -notlike "*\build\*" } |
+        Select-Object -ExpandProperty FullName
+    Write-Host "Checking $($manifestFiles.Count) Gradle manifest file(s) for safe versions"
+} else {
+    $manifestFiles = Get-ChildItem $REPO_ROOT -Recurse -Filter "pom.xml" |
+        Where-Object { $_.FullName -notlike "*\target\*" } |
+        Select-Object -ExpandProperty FullName
+    Write-Host "Checking $($manifestFiles.Count) pom.xml file(s) for safe versions"
+}
 
-$pomFiles | ForEach-Object {
+$manifestFiles | ForEach-Object {
     Write-Host "=== $_ ==="
-    Select-String -Path $_ -Pattern "log4j-core|log4j\.version" -Context 0,1
-    Select-String -Path $_ -Pattern "jackson\.version" -Context 0,1
+    Select-String -Path $_ -Pattern "log4j-core|log4j.*version" -Context 0,1
+    Select-String -Path $_ -Pattern "jackson.*version" -Context 0,1
 }
 ```
 
-Report each package: ✅ safe version confirmed (in at least one pom.xml) | ❌ old version still present in all checked files.
+Report each package: ✅ safe version confirmed (in at least one manifest file) | ❌ old version still present in all checked files.
 
 ---
 
@@ -88,7 +96,11 @@ Report each package: ✅ safe version confirmed (in at least one pom.xml) | ❌ 
 
 ```powershell
 Set-Location $REPO_ROOT
-& $MVN_CMD dependency:tree -q | Select-String -Pattern "ERROR|WARNING|WARN"
+if ($BUILD_TOOL -eq 'gradle') {
+    & $GRADLE_CMD dependencies --configuration runtimeClasspath -q | Select-String -Pattern "ERROR|WARNING|WARN"
+} else {
+    & $MVN_CMD dependency:tree -q | Select-String -Pattern "ERROR|WARNING|WARN"
+}
 ```
 
 Also confirm `VALIDATION_RESULTS` shows compile and all tests passed.
@@ -99,7 +111,11 @@ Also confirm `VALIDATION_RESULTS` shows compile and all tests passed.
 
 ```powershell
 Set-Location $REPO_ROOT
-& $MVN_CMD test | Select-String -Pattern "Tests run|BUILD|FAILURE|ERROR" | Select-Object -Last 20
+if ($BUILD_TOOL -eq 'gradle') {
+    & $GRADLE_CMD test | Select-String -Pattern "tests|BUILD|FAILURE|ERROR" | Select-Object -Last 20
+} else {
+    & $MVN_CMD test | Select-String -Pattern "Tests run|BUILD|FAILURE|ERROR" | Select-Object -Last 20
+}
 ```
 
 ```powershell
@@ -116,7 +132,7 @@ if (Test-Path $JACOCO_XML) {
 ### 5. Confirm Acceptance Criteria
 
 - All CRITICAL and HIGH CVEs addressed OR noted as BOM-managed/skipped
-- No new `<dependency>` blocks without a `<version>` tag (unless BOM-managed)
+- No new unmanaged version strings: Maven → no new `<dependency>` without `<version>` tag; Gradle → no new inline hardcoded versions where property-backed alternatives exist
 - Sibling groups still consistent
 
 ```powershell
