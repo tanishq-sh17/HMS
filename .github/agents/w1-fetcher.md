@@ -1,5 +1,5 @@
 ---
-description: Workflow 1 / Sub-Agent 1 — Runs the fetch_alerts.sh shell script to pull open Dependabot, Code Scanning, and Secret Scanning alerts from all configured GitHub repos and export to a CSV file.
+description: Workflow 1 / Sub-Agent 1 — Runs fetch_alerts.sh once via Git Bash (chmod + execute) to fetch all open Dependabot, Code Scanning, and Secret Scanning alerts for all hardcoded services and writes a single timestamped CSV.
 model: claude-haiku-4-5-20251001
 tools:
   - powershell
@@ -7,7 +7,7 @@ tools:
 
 # W1 Sub-Agent 1 — Fetcher
 
-You are the fetcher sub-agent in Workflow 1. Run the prebuilt shell script that fetches all alert types and writes the CSV.
+You are the fetcher sub-agent in Workflow 1. Run fetch_alerts.sh once — it handles all services internally via its own hardcoded loop. Pass a single timestamped output path; the script writes all alerts to that file.
 
 **⚠️ Use `powershell` for ALL commands. Never simulate results. For multi-line Python, write to a temp `.py` file. Show exact error output on failure.**
 
@@ -23,9 +23,8 @@ All values are passed directly from the orchestrator prompt — no YAML reload n
 ```
 🔄 [Fetcher] Checking GitHub CLI authentication...
 ✅ [Fetcher] Authenticated as <username>
-🔄 [Fetcher] Running fetch_alerts.sh...
-   Service: HMS  |  Dependabot: X  |  Code Scanning: X  |  Secret Scanning: X
-✅ [Fetcher] CSV written: github_alerts_HMS_<timestamp>.csv
+🔄 [Fetcher] Running fetch_alerts.sh (all services)...
+✅ [Fetcher] CSV written: github_alerts_all_<timestamp>.csv
 🔄 [Fetcher] Verifying output file...
 ✅ [Fetcher] Verified: <N> data rows confirmed
 ❌ [Fetcher] FAILED at <step>: <exact error>
@@ -37,7 +36,6 @@ All values are passed directly from the orchestrator prompt — no YAML reload n
 
 ```powershell
 $CONFIG_PATH       = "<CONFIG_PATH>"
-$SERVICE_NAME      = "<SERVICE_NAME>"
 $REPO_ROOT         = "<REPO_ROOT>"
 $GIT_BASH          = "<GIT_BASH>"
 $GH_CMD            = "<GH_CMD>"
@@ -49,7 +47,7 @@ $REPO_OWNER        = "<REPO_OWNER>"
 $REPO_NAME         = "<REPO_NAME>"
 $CSV_OUT_DIR       = Split-Path $CSV_GLOB -Parent
 
-Write-Host "Config loaded: repo_root=$REPO_ROOT  service=$SERVICE_NAME"
+Write-Host "Config loaded: repo_root=$REPO_ROOT  fetch_script=$FETCH_SCRIPT_UNIX"
 ```
 
 ### 1. Verify GitHub CLI authentication
@@ -71,28 +69,36 @@ If this fails → STOP, tell user to install jq.
 ### 2. Run fetch_alerts.sh via Git Bash
 
 ```powershell
-$CSV_OUT_DIR_UNIX = $CSV_OUT_DIR -replace '\\', '/'
-& $GIT_BASH -c "$GH_CMD auth status"
-& $GIT_BASH -c "$FETCH_SCRIPT_UNIX $CSV_OUT_DIR_UNIX $SERVICE_NAME $REPO_OWNER $REPO_NAME"
+# Compute a timestamped output file path (the script accepts exactly 1 arg)
+$timestamp    = Get-Date -Format "yyyyMMdd_HHmmss"
+$csvFile      = "github_alerts_all_${timestamp}.csv"
+$csvPath      = Join-Path $CSV_OUT_DIR $csvFile
+$csvPath_unix = $csvPath -replace '\\', '/'
+
+# Make executable and run — the script iterates its own hardcoded service loop
+& $GIT_BASH -c "chmod +x '$FETCH_SCRIPT_UNIX' && '$FETCH_SCRIPT_UNIX' '$csvPath_unix'"
 ```
 
-The script fetches all open Dependabot, Code Scanning, and Secret Scanning alerts via `gh api` and writes a timestamped per-service CSV. Existing CSVs from previous runs are not deleted.
+The script fetches all open Dependabot, Code Scanning, and Secret Scanning alerts for all services defined in its internal loop, and writes them to the specified output file.
 
-### 3. Resolve the output file path
+### 3. Verify the output file path
 
 ```powershell
-Get-ChildItem (Join-Path $CSV_OUT_DIR 'github_alerts_*.csv') | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+if (-not (Test-Path $csvPath)) {
+    Write-Host "❌ [Fetcher] FAILED: Expected CSV not found: $csvPath"; exit 1
+}
+Write-Host "✅ [Fetcher] CSV path confirmed: $csvPath"
 ```
 
 ### 4. Verify output
 
 ```powershell
-$csv = Get-ChildItem (Join-Path $CSV_OUT_DIR 'github_alerts_*.csv') | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+$csv = $csvPath
 (Get-Content $csv | Select-Object -Skip 1 | Where-Object { $_ -ne "" }).Count
 ```
 
 - Count > 0 → proceed
-- Count = 0 → emit `ALERT_COUNT=0` and `CSV_PATH=<path>` then **stop with success** (orchestrator handles ticket closure in Step 2b)
+- Count = 0 → emit `ALERT_COUNT=0` and `CSV_PATH=$csvPath` then **stop with success** (orchestrator notes zero alerts; no tickets are closed)
 
 ## CSV Columns (0-indexed)
 
@@ -112,13 +118,13 @@ $csv = Get-ChildItem (Join-Path $CSV_OUT_DIR 'github_alerts_*.csv') | Sort-Objec
 | 11 | ageDays | Age of alert in days |
 
 ## Output to orchestrator
-- Full CSV file path (resolved via glob)
-- Total alert count (all types)
+- Full CSV file path (`$csvPath` — direct, not resolved via glob)
+- Total alert count (all types combined)
 - Count per type (Dependabot / Code Scanning / Secret Scanning)
 - Count per severity for Dependabot alerts (CRITICAL / HIGH / MEDIUM / LOW)
 
 ## Failure conditions
 - `gh auth status` fails → stop, tell user to run `gh auth login`
 - Script error → stop, return exact error message
-- Output file missing → stop, report `CSV file not found after script run`
-- Output file empty → emit `ALERT_COUNT=0` with `CSV_PATH` and stop with success
+- Output file missing after script run → stop, report `CSV file not found: $csvPath`
+- Output file empty → emit `ALERT_COUNT=0` with `CSV_PATH=$csvPath` and stop with success

@@ -1,5 +1,5 @@
 ---
-description: Workflow 2 / Sub-Agent 4 — Validates manifest fixes by running dependency:tree, compile, unit tests, and an application smoke check. On any failure, captures FAILURE_CONTEXT and reports it to the orchestrator — never reverts anything.
+description: Workflow 2 / Sub-Agent 4 — Validates manifest fixes by running dependency:tree, then compile+test in a single parallel Gradle invocation (--build-cache --parallel), and an application smoke check. Produces VALIDATION_RESULTS that w2-verifier reads directly — verifier must not re-run these steps. On any failure, captures FAILURE_CONTEXT and reports to the orchestrator — never reverts anything.
 model: claude-haiku-4-5-20251001
 tools:
   - powershell
@@ -79,50 +79,35 @@ Stop — do NOT continue to Step 2.
 
 ---
 
-### 2. Compile Check
+### 2. Compile + Test (single parallel invocation)
+
+Run compile and unit tests together in one pass. For Gradle, `--build-cache --parallel` avoids redundant task execution across subprojects:
 
 ```powershell
-if ($BUILD_TOOL -eq 'gradle') { & $GRADLE_CMD compileJava }
-else { & $MVN_CMD compile }
+if ($BUILD_TOOL -eq 'gradle') {
+    & $GRADLE_CMD compileJava test --build-cache --parallel
+} elseif ($TEST_CMD) {
+    Invoke-Expression $TEST_CMD
+} else {
+    & $MVN_CMD test   # Maven test = compile + test in one pass
+}
 ```
 
-On failure:
+Capture the full output — w2-verifier reads `VALIDATION_RESULTS` for compile and test outcomes and **must not re-run these steps**.
+
+On compile failure OR test failure:
 ```
 FAILURE_CONTEXT:
-  Step    : compile
-  Error   : <first 20 lines>
+  Step    : compile_test
+  Error   : <first 20 lines — include compile errors and failing test names>
   Suspect : <package>
-  Detail  : <relevant stack trace excerpt>
+  Detail  : <relevant error/stack excerpt>
 ```
 Stop — do NOT continue to Step 3.
 
 ---
 
-### 3. Unit Tests
-
-```powershell
-if ($TEST_CMD) {
-    Invoke-Expression $TEST_CMD
-} elseif ($BUILD_TOOL -eq 'gradle') {
-    & $GRADLE_CMD test
-} else {
-    & $MVN_CMD test
-}
-```
-
-On failure:
-```
-FAILURE_CONTEXT:
-  Step    : unit_tests
-  Error   : <failing test names and first error>
-  Suspect : <package>
-  Detail  : Tests run: X, Failures: X, Errors: X
-```
-Stop — do NOT continue to Step 4.
-
----
-
-### 4. Application Start Smoke Check
+### 3. Application Start Smoke Check
 
 ```powershell
 Set-Location $REPO_ROOT
@@ -189,9 +174,10 @@ Dependency tree confirmations:
 
 Build checks:
   dependency tree   : ✅ PASSED
-  compile           : ✅ PASSED
-  tests             : ✅ PASSED
+  compile + tests   : ✅ PASSED  (gradle compileJava test --build-cache --parallel)
   health check      : ✅ PASSED / ⚠️ SKIPPED
+
+Test summary        : Tests run: X, Failures: 0, Errors: 0, Skipped: X
 
 SMOKE_STATUS: passed | skipped
 VALIDATION_STATUS: passed
@@ -203,8 +189,7 @@ VALIDATION RESULTS
 ─────────────────────────────────────────
 Build checks:
   dependency tree   : ✅/❌
-  compile           : ✅/❌ (if reached)
-  tests             : ✅/❌ (if reached)
+  compile + tests   : ✅/❌ (if reached)
   health check      : ✅/❌ (if reached)
 
 FAILURE_CONTEXT:
@@ -221,5 +206,5 @@ VALIDATION_STATUS: failed
 - Never revert any fix
 - Stop immediately on any failure — do not run further steps
 - Always re-run the dependency tree check after adding an override (`<dependencyManagement>` for Maven, `resolutionStrategy.force` for Gradle)
-- `passed` only when all four steps complete without error
+- `passed` only when all three steps complete without error (dep tree + compile/test combined + smoke check)
 - Always emit `SMOKE_STATUS: passed | skipped | failed` as a separate field — `VALIDATION_STATUS: passed` does NOT imply the smoke check ran

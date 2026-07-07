@@ -24,6 +24,8 @@ except ImportError:
     print("ERROR: PyYAML not installed. Run: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
 
+_WORKFLOW_LABELS = {"w1": "W1", "w2": "W2", "both": "W1+W2"}
+
 
 def get_nested(data: dict, dotted_key: str):
     """Retrieve a value from a nested dict using dot notation."""
@@ -34,6 +36,18 @@ def get_nested(data: dict, dotted_key: str):
             return None
         current = current[k]
     return current
+
+
+def _check_fields(cfg, fields, errors, check_exists=False):
+    """Append error entries for missing or absent-path fields."""
+    for field in fields:
+        value = get_nested(cfg, field)
+        if check_exists:
+            if value and not os.path.exists(value):
+                errors.append(f"  [PATH NOT FOUND] {field} = '{value}'")
+        else:
+            if value is None or (isinstance(value, str) and not value.strip()):
+                errors.append(f"  [MISSING] {field} — required but not set")
 
 
 def validate(config_path: str) -> bool:
@@ -69,19 +83,13 @@ def validate(config_path: str) -> bool:
         "jira.site_url",
         "jira.project_key",
     ]
-    for field in required_fields:
-        value = get_nested(cfg, field)
-        if value is None or (isinstance(value, str) and not value.strip()):
-            errors.append(f"  [MISSING] {field} — required but not set")
+    _check_fields(cfg, required_fields, errors)
 
     # ── Required paths ────────────────────────────────────────────
     required_paths = get_nested(cfg, "validation.required_paths") or [
         "environment.repo_root",
     ]
-    for path_field in required_paths:
-        path_val = get_nested(cfg, path_field)
-        if path_val and not os.path.exists(path_val):
-            errors.append(f"  [PATH NOT FOUND] {path_field} = '{path_val}'")
+    _check_fields(cfg, required_paths, errors, check_exists=True)
 
     # ── Always-on semantic checks ─────────────────────────────────
     jira_url = get_nested(cfg, "jira.site_url") or ""
@@ -144,7 +152,7 @@ def validate(config_path: str) -> bool:
     repo_name    = get_nested(cfg, "environment.repo_name")
     service_name = get_nested(cfg, "environment.service_name")
     project_key  = get_nested(cfg, "jira.project_key")
-    wf_label     = {"w1": "W1", "w2": "W2", "both": "W1+W2"}.get(workflow_type, workflow_type)
+    wf_label     = _WORKFLOW_LABELS.get(workflow_type, workflow_type)
     print(f"Config OK [{wf_label}] — repo={repo_owner}/{repo_name}  service={service_name}  jira={project_key}")
     return True
 

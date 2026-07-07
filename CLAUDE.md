@@ -227,10 +227,9 @@ A two-workflow, multi-agent system lives in `.github/agents/` (mirrored in `.cla
 
 Steps run in order; any failure stops the workflow.
 
-1. **`w1-fetcher`** (Sub-Agent 1) — runs once **per service** in a multi-service loop; services are loaded from the root-level `services` array in `ghas-w1-config.yml` as `{ name, github_repo }` objects. Runs `fetch_alerts.sh` via Git Bash using `gh` CLI; fetches Dependabot, Code Scanning, and Secret Scanning alerts; writes a timestamped CSV per service. If `ALERT_COUNT=0` the fetcher emits that count and exits successfully — it does **not** stop — the orchestrator queues those services for ticket-closure in Step 2b.
-2. **Orchestrator derives `SERVICE_NAMES` inline** — after all fetchers complete, `$SERVICE_NAMES = $NONZERO_ALERT_SVCS -join ','`. **`@w1-sorter` is no longer invoked as a sub-agent.**
+1. **`w1-fetcher`** (Sub-Agent 1) — runs **once**; `fetch_alerts.sh` handles all services via its own internal hardcoded loop. Runs the script via Git Bash (`chmod +x` + single timestamped output path); fetches Dependabot, Code Scanning, and Secret Scanning alerts for all services; writes **one consolidated CSV**. If `ALERT_COUNT=0` the fetcher emits that count and exits successfully — no tickets are closed.
+2. **Orchestrator runs Step 1.5 inline** — parses the consolidated CSV to count alert rows per configured service; derives `$NONZERO_ALERT_SVCS` and `$ZERO_ALERT_SVCS`; sets `$SERVICE_NAMES = $NONZERO_ALERT_SVCS -join ','`. Zero-alert services are logged in the Final Output for visibility only — no tickets are created or closed for them. **`@w1-sorter` is no longer invoked as a sub-agent.**
 3. **`w1-jira-manager`** (Sub-Agent 2, active) — searches Jira via **`jira_ticket_manager.py search`** using a JQL query filtered by labels, service, status, and optionally `parent_jira`; if an active ticket exists (status in `skip_statuses`), compares CVEs and **updates its description in-place** via `update-description`; if no active ticket exists (or prior is Done/Testing/QA), creates a fresh consolidated ticket; updates CSV with Jira key + status
-4. **Step 2b (zero-alert closure)** — if any service returned `ALERT_COUNT=0`, orchestrator uses **`jira_ticket_manager.py search`** to find open tickets, then **`jira_ticket_manager.py transition --name Done`** to close them.
 
 **Multi-service config** — add one entry per service under the root-level `services` key (not under `environment`):
 ```yaml
@@ -242,7 +241,7 @@ services:
 ```
 `environment.service_name` is the single-service fallback used only when `services` is absent.
 
-> **Testing with multiple services in the same repo** — multiple service entries can share the same `github_repo`. Each gets its own fetcher run, CSV, and Jira ticket under a different service name. Alerts will be identical (same GitHub repo), but the full multi-service loop is exercised.
+> **Testing with multiple services in the same repo** — multiple service entries can share the same `github_repo`. Each gets its own Jira ticket under a different service name. Alerts will be identical (same GitHub repo), but the full per-service Jira management flow is exercised.
 
 **W1 Sub-agent reference:**
 
@@ -256,7 +255,7 @@ services:
 
 | Sub-agent | Variables passed by orchestrator |
 |---|---|
-| `@w1-fetcher` | `CONFIG_PATH`, `SERVICE_NAME` = `$svc.name`, `REPO_NAME` = `$svc.github_repo` (per-service — may differ from `environment.repo_name`), `REPO_ROOT`, `GIT_BASH`, `GH_CMD`, `PYTHON_CMD`, `FETCH_SCRIPT_UNIX`, `CSV_GLOB`, `REPO_OWNER` |
+| `@w1-fetcher` | `CONFIG_PATH`, `REPO_ROOT`, `GIT_BASH`, `GH_CMD`, `PYTHON_CMD`, `FETCH_SCRIPT_UNIX`, `REPO_ROOT_UNIX`, `CSV_GLOB`, `REPO_OWNER`, `REPO_NAME` |
 | `@w1-jira-manager` | `CONFIG_PATH`, `CSV_PATH`, `SERVICE_NAMES`, `SKIP_STATUSES`, `PYTHON_CMD`, `JIRA_SCRIPT`, `JIRA_PROJECT`, `BASE_LABEL`, `CSV_GLOB`, `PARENT_JIRA`, `SEARCH_LABELS` |
 
 **Jira ticket title format:** `Address GHAS vulnerabilities for <SERVICE_NAME> [Critical-<N>, High-<N>, Medium-<N>, Low-<N>]`

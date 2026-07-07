@@ -1,0 +1,16 @@
+{
+  "allowedTools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "Bash",
+    "PowerShell",
+    "task",
+    "TaskCreate",
+    "TaskUpdate",
+    "TaskList",
+    "TaskGet"
+  ]
+}

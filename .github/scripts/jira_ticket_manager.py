@@ -41,6 +41,17 @@ except ImportError:
 
 _CONFIG_CACHE = None
 
+
+def _deep_merge(base, override):
+    result = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            result[k] = _deep_merge(base[k], v)
+        else:
+            result[k] = v
+    return result
+
+
 def load_config():
     """Load ghas-w1-config.yml from .github/config/ at the repo root.
     Returns a dict. Falls back to built-in defaults if the file is missing or
@@ -83,17 +94,7 @@ def load_config():
     with open(config_path, encoding="utf-8") as f:
         loaded = yaml.safe_load(f) or {}
 
-    # Deep-merge loaded values over defaults
-    def _merge(base, override):
-        result = dict(base)
-        for k, v in override.items():
-            if isinstance(v, dict) and isinstance(base.get(k), dict):
-                result[k] = _merge(base[k], v)
-            else:
-                result[k] = v
-        return result
-
-    _CONFIG_CACHE = _merge(defaults, loaded)
+    _CONFIG_CACHE = _deep_merge(defaults, loaded)
     return _CONFIG_CACHE
 
 
@@ -106,10 +107,9 @@ def get_jira_config():
 # Auth helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_env():
-    """Load .env from repo root (two levels up from this script)."""
-    script_dir = Path(__file__).resolve().parent          # .github/scripts/
-    repo_root  = script_dir.parent.parent                  # repo root
+def get_auth():
+    script_dir = Path(__file__).resolve().parent
+    repo_root  = script_dir.parent.parent
     env_file   = repo_root / ".env"
     if env_file.exists():
         for line in env_file.read_text(encoding="utf-8").splitlines():
@@ -117,12 +117,8 @@ def load_env():
             if not line or line.startswith("#") or "=" not in line:
                 continue
             k, v = line.split("=", 1)
-            if k.strip() not in os.environ:              # env var takes precedence
+            if k.strip() not in os.environ:
                 os.environ[k.strip()] = v.strip()
-
-
-def get_auth():
-    load_env()
     email    = os.environ.get("JIRA_EMAIL", "")
     token    = os.environ.get("JIRA_API_TOKEN", "")
     base_url = os.environ.get("JIRA_BASE_URL") or os.environ.get("JIRA_URL", "")
@@ -195,6 +191,57 @@ def cmd_search(args):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Shared helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_service_alerts(csv_path, service_name):
+    """Load and return alert rows for a service from a CSV. Exits on error."""
+    path = Path(csv_path)
+    if not path.exists():
+        print(f"ERROR: CSV not found: {path}", file=sys.stderr)
+        sys.exit(1)
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    service_rows = [r for r in rows if r.get("service", "").strip().lower() == service_name.strip().lower()]
+    if not service_rows:
+        print(f"ERROR: No rows found for service '{service_name}' in {path}", file=sys.stderr)
+        sys.exit(1)
+    return service_rows
+
+
+def _count_severity(alerts):
+    c = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    for a in alerts:
+        sev = (a.get("severity") or "").upper()
+        if sev in c:
+            c[sev] += 1
+    return c
+
+
+def _severity_summary(alerts):
+    counts = _count_severity(alerts)
+    return ", ".join(f"{k.capitalize()}-{v}" for k, v in counts.items() if v > 0)
+
+
+def _apply_optional_jira_fields(payload, jira_cfg):
+    """Add optional Jira fields (assignee, story_points, team, parent) to payload in place."""
+    if jira_cfg.get("assignee"):
+        payload["fields"]["assignee"] = {"accountId": jira_cfg["assignee"]}
+    if jira_cfg.get("story_points") is not None:
+        # story_points field ID varies per Jira instance (e.g. customfield_10016).
+        # Set jira.story_points_field in config to the correct field ID for your board.
+        field = jira_cfg.get("story_points_field", "customfield_10016")
+        payload["fields"][field] = jira_cfg["story_points"]
+    if jira_cfg.get("team"):
+        # team field ID varies per Jira instance (e.g. customfield_10014).
+        # Set jira.team_field in config to the correct field ID for your board.
+        field = jira_cfg.get("team_field", "customfield_10014")
+        payload["fields"][field] = {"name": jira_cfg["team"]}
+    if jira_cfg.get("parent_jira"):
+        payload["fields"]["parent"] = {"key": jira_cfg["parent_jira"]}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ADF builders
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -262,16 +309,8 @@ def build_adf_description(service_name, grouped_alerts):
     cs_alerts  = [a for a in grouped_alerts if a.get("type") == "code-scanning"]
     ss_alerts  = [a for a in grouped_alerts if a.get("type") == "secret-scanning"]
 
-    def count_sev(alerts):
-        c = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
-        for a in alerts:
-            sev = (a.get("severity") or "").upper()
-            if sev in c:
-                c[sev] += 1
-        return c
-
-    dep_counts   = count_sev(dep_alerts)
-    cs_counts    = count_sev(cs_alerts)
+    dep_counts   = _count_severity(dep_alerts)
+    cs_counts    = _count_severity(cs_alerts)
     total_counts = {k: dep_counts[k] + cs_counts[k] for k in dep_counts}
 
     severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
@@ -409,49 +448,11 @@ def cmd_create(args):
     """Create a Jira ticket for a service from CSV data. Prints the new Jira key."""
     base_url, headers = get_auth()
 
-    # Load CSV
-    csv_path = Path(args.csv)
-    if not csv_path.exists():
-        print(f"ERROR: CSV not found: {csv_path}", file=sys.stderr)
-        sys.exit(1)
+    alerts = _load_service_alerts(args.csv, args.service)
 
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-
-    service_rows = [r for r in rows if r.get("service", "").strip().lower() == args.service.strip().lower()]
-    if not service_rows:
-        print(f"ERROR: No rows found for service '{args.service}' in {csv_path}", file=sys.stderr)
-        sys.exit(1)
-
-    # Map CSV rows to alert dicts — include all fields needed for compliance table & configurable columns
-    alerts = []
-    for r in service_rows:
-        alerts.append({
-            "type":         r.get("type", ""),
-            "ghsa_id":      r.get("ghsa_id", ""),
-            "cve_id":       r.get("cve_id", ""),
-            "title":        r.get("title", ""),
-            "severity":     r.get("severity", ""),
-            "created":      r.get("created", ""),
-            "due":          r.get("due", ""),
-            "ageDays":      r.get("ageDays", ""),
-            "nonCompliant": r.get("nonCompliant", "0"),
-            "url":          r.get("url", ""),
-        })
-
-    # Compute counts for ticket title
-    dep_alerts = [a for a in alerts if a["type"] == "dependabot"]
-    cs_alerts  = [a for a in alerts if a["type"] == "code-scanning"]
-    all_vuln   = dep_alerts + cs_alerts
-
-    sev_totals = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
-    for a in all_vuln:
-        sev = (a.get("severity") or "").upper()
-        if sev in sev_totals:
-            sev_totals[sev] += 1
-
-    sev_parts       = [f"{k.capitalize()}-{v}" for k, v in sev_totals.items() if v > 0]
-    severity_summary = ", ".join(sev_parts)
+    # Severity summary for ticket title
+    all_vuln         = [a for a in alerts if a.get("type") in ("dependabot", "code-scanning")]
+    severity_summary = _severity_summary(all_vuln)
 
     # Priority — read from config (set by business, not severity-mapped); None = don't set
     jira_cfg = get_jira_config()
@@ -482,29 +483,9 @@ def cmd_create(args):
         }
     }
 
-    # Optional fields — only added when explicitly set in config (not None)
     if priority:
         payload["fields"]["priority"] = {"name": priority}
-
-    assignee     = jira_cfg.get("assignee")
-    story_points = jira_cfg.get("story_points")
-    team         = jira_cfg.get("team")
-    parent_jira  = jira_cfg.get("parent_jira")
-
-    if assignee:
-        payload["fields"]["assignee"] = {"accountId": assignee}
-    # story_points field ID varies per Jira instance (e.g. customfield_10016).
-    # Set jira.story_points_field in config to the correct field ID for your board.
-    if story_points is not None:
-        story_points_field = jira_cfg.get("story_points_field", "customfield_10016")
-        payload["fields"][story_points_field] = story_points
-    # team field ID varies per Jira instance (e.g. customfield_10014).
-    # Set jira.team_field in config to the correct field ID for your board.
-    if team:
-        team_field = jira_cfg.get("team_field", "customfield_10014")
-        payload["fields"][team_field] = {"name": team}
-    if parent_jira:
-        payload["fields"]["parent"] = {"key": parent_jira}
+    _apply_optional_jira_fields(payload, jira_cfg)
 
     url  = f"{base_url}/rest/api/3/issue"
     resp = jira_request("POST", url, headers, json=payload)
@@ -618,18 +599,7 @@ def cmd_update_description(args):
     """Re-generate and PUT the ADF description for an existing ticket from a CSV."""
     base_url, headers = get_auth()
 
-    # Read alerts for the service from the CSV
-    alerts = []
-    with open(args.csv, newline="", encoding="utf-8") as fh:
-        reader = csv.DictReader(fh)
-        for row in reader:
-            svc = (row.get("service") or "").strip().upper()
-            if svc == args.service.strip().upper():
-                alerts.append(row)
-
-    if not alerts:
-        print(f"ERROR: No alerts found for service '{args.service}' in {args.csv}", file=sys.stderr)
-        sys.exit(1)
+    alerts = _load_service_alerts(args.csv, args.service)
 
     adf = build_adf_description(args.service, alerts)
     payload = {"fields": {"description": adf}}

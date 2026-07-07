@@ -1,6 +1,6 @@
 ---
-description: Workflow 2 / Sub-Agent 5 — Performs comprehensive verification of the implementation by cross-checking code against Jira requirements, validating all CVEs are addressed, confirming no regressions, and checking test coverage threshold. Uses jira_ticket_manager.py get for Jira cross-check — no MCP.
-model: claude-sonnet-4-6
+description: Workflow 2 / Sub-Agent 5 — Performs comprehensive verification of the implementation by cross-checking code against Jira requirements, validating all CVEs are addressed, confirming no regressions, and checking test coverage threshold. Reads dep-tree and test results from VALIDATION_RESULTS (produced by w2-validator) — never re-runs compile, test, or dependency:tree. Uses jira_ticket_manager.py get for Jira cross-check — no MCP.
+model: claude-haiku-4-5-20251001
 tools:
   - powershell
 ---
@@ -94,28 +94,32 @@ Report each package: ✅ safe version confirmed (in at least one manifest file) 
 
 ### 3. Check for Regressions
 
+Read regression status directly from `VALIDATION_RESULTS` — do **not** re-run dependency:tree or compile (already executed by w2-validator).
+
 ```powershell
-Set-Location $REPO_ROOT
-if ($BUILD_TOOL -eq 'gradle') {
-    & $GRADLE_CMD dependencies --configuration runtimeClasspath -q | Select-String -Pattern "ERROR|WARNING|WARN"
-} else {
-    & $MVN_CMD dependency:tree -q | Select-String -Pattern "ERROR|WARNING|WARN"
-}
+$vrLines   = $VALIDATION_RESULTS -split "`n"
+$depTreeOK = $vrLines | Where-Object { $_ -match 'dependency tree\s*:\s*✅' }
+$buildOK   = $vrLines | Where-Object { $_ -match 'compile.*tests\s*:\s*✅' }
+
+Write-Host "Regression check (from VALIDATION_RESULTS):"
+Write-Host "  Dependency tree : $(if ($depTreeOK) { '✅ PASSED' } else { '❌ Not confirmed' })"
+Write-Host "  Compile + tests : $(if ($buildOK)   { '✅ PASSED' } else { '❌ Not confirmed' })"
 ```
 
-Also confirm `VALIDATION_RESULTS` shows compile and all tests passed.
+If either is not confirmed → include in ISSUES.
 
 ---
 
 ### 4. Validate Test Coverage
 
+Read test results from `VALIDATION_RESULTS` — do **not** re-run tests (already run by w2-validator).
+
 ```powershell
-Set-Location $REPO_ROOT
-if ($BUILD_TOOL -eq 'gradle') {
-    & $GRADLE_CMD test | Select-String -Pattern "tests|BUILD|FAILURE|ERROR" | Select-Object -Last 20
-} else {
-    & $MVN_CMD test | Select-String -Pattern "Tests run|BUILD|FAILURE|ERROR" | Select-Object -Last 20
-}
+$testSummary = ($VALIDATION_RESULTS -split "`n") |
+    Where-Object { $_ -match 'Test summary|Tests run:|BUILD (SUCCESS|FAILURE)|FAILURE|ERROR' } |
+    Select-Object -Last 10
+Write-Host "Test summary (from w2-validator):"
+$testSummary | ForEach-Object { Write-Host "  $_" }
 ```
 
 ```powershell
@@ -171,6 +175,7 @@ COVERAGE_SUMMARY:
 
 ## Rules
 - Never modify any file
+- Never re-run compile, test, or dependency:tree — read their outcomes from `VALIDATION_RESULTS` (Steps 3–4)
 - BOM-managed skips are informational — not failures
 - If `jira_ticket_manager.py get` exits non-zero → skip Check 1, continue with Checks 2–5
 - `VERIFICATION_RESULT = issues_found` if ANY check returns ❌

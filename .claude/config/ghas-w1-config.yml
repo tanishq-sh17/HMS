@@ -1,0 +1,125 @@
+# ==============================================================
+# GHAS Workflow 1 Configuration — Alert Ingestion
+# ==============================================================
+# Drives Workflow 1 (Alert Ingestion) only.
+# Workflow 2 settings are in ghas-w2-config.yml.
+#
+# HOW TO USE
+#   1. Fill in every [REQUIRED] field for your environment.
+#   2. Adjust optional fields to match your Jira board.
+#   3. Run Workflow 1 — the orchestrator validates this
+#      file at startup and fails fast on missing/invalid values.
+#
+# PORTABILITY
+#   This file is the only place you need to change to run
+#   Workflow 1 in a different project or environment.
+# ==============================================================
+
+workflow_type: w1
+
+
+# --------------------------------------------------------------
+# ENVIRONMENT — identifies your project and local machine
+# --------------------------------------------------------------
+environment:
+  repo_owner: tanishq-sh17          # [REQUIRED] GitHub owner (org or user)
+  repo_name: HMS                    # [REQUIRED] GitHub repository name
+  service_name: HMS                 # [REQUIRED] Display name used in Jira tickets and reports
+  repo_root: C:\Users\TanishqShrivas\DummyProj\GHAS-dummy-projects\HMS  # [REQUIRED] Absolute path to repo root on this machine
+
+
+# --------------------------------------------------------------
+# TOOLS — CLI tool locations
+# Override if a tool is not on PATH or lives in a non-standard place.
+# Use just the binary name (e.g. "gh") if it is on PATH.
+# --------------------------------------------------------------
+tools:
+  git_bash: "C:\\Program Files\\Git\\bin\\bash.exe"  # Windows (Git for Windows default). macOS/Linux: change to "bash".
+  gh: gh                            # GitHub CLI binary
+  jq: jq                            # jq binary
+  python: python                    # Python 3 binary
+
+
+# --------------------------------------------------------------
+# JIRA — project and ticket settings for alert ingestion
+# --------------------------------------------------------------
+jira:
+  site_url: https://tanishqshrivas.atlassian.net  # [REQUIRED] Your Atlassian site URL (no trailing slash)
+  project_key: HMS                  # [REQUIRED] Jira project key
+
+  # Labels added to every new ticket.
+  # The service_name is ALWAYS appended automatically as an extra label.
+  labels: [GHAS]
+
+  assignee: null                    # Jira accountId string, or null for unassigned
+  parent_jira: null                 # Parent epic key (e.g. HMS-5), or null. When set: (1) attached as parent on new tickets, (2) added to duplicate-search JQL. Null = search all epics.
+  search_labels: null               # Labels that must ALL appear on a ticket to match duplicate search. Null = defaults to jira.labels.
+  story_points: null                # Story points for new tickets (null = field not sent)
+  story_points_field: customfield_10016  # Jira custom field ID for story points (varies per instance)
+  team: null                        # Team name, or null to leave blank (null = field not sent)
+  team_field: customfield_10014     # Jira custom field ID for team (varies per instance)
+  priority: High                    # Ticket priority — set by business, not mapped per severity; null = field not sent
+  issue_type: Bug                   # Jira issue type (Bug / Task / Story / Security Finding)
+
+  # Template for the ticket summary (title) line.
+  # Placeholders: {service_name}  {severity_summary}  (e.g. "Critical-2, High-5, Medium-3, Low-1")
+  ticket_summary_template: "Address GHAS vulnerabilities for {service_name} [{severity_summary}]"
+
+  # Columns shown in the Dependabot alert table inside the ticket description.
+  # Available columns: ghsa_id, cve_id, title, severity, created, due, ageDays, nonCompliant, url
+  ticket_table_columns: [ghsa_id, cve_id, title, nonCompliant]
+
+  # Status-aware duplicate detection.
+  # A NEW ticket is created only when the existing ticket's status is NOT in this list.
+  skip_statuses_for_duplicate_check:
+    - To Do
+    - Funnel
+    - Analysis
+    - In Dev
+    - Blocked
+    - On Hold
+
+
+# --------------------------------------------------------------
+# SCRIPTS — utility script paths (relative to repo_root)
+# --------------------------------------------------------------
+scripts:
+  fetch_alerts: .github/scripts/fetch_alerts.sh
+  jira_ticket_manager: .github/scripts/jira_ticket_manager.py
+  config_validator: .github/scripts/validate_config.py
+
+
+# --------------------------------------------------------------
+# CSV — alert export file settings
+# --------------------------------------------------------------
+csv:
+  output_dir: "."                   # Directory for CSV output, relative to repo_root ("." = repo root)
+  filename_pattern: "github_alerts_{service}_{timestamp}.csv"
+  glob_pattern: "github_alerts_*.csv"
+  # Column header written to new CSV files (must match fetch_alerts.sh output)
+  header: "service,type,ghsa_id,cve_id,title,severity,created,due,url,Application,nonCompliant,ageDays"
+
+
+# --------------------------------------------------------------
+# SERVICES — GitHub repositories to scan in Workflow 1
+# Add one entry per service/repository.
+# The GitHub owner is taken from environment.repo_owner.
+# --------------------------------------------------------------
+services:
+  - name: HMS                       # Service display name (used in Jira labels and CSV)
+    github_repo: HMS                # GitHub repository name (may differ from service name)
+
+
+# --------------------------------------------------------------
+# VALIDATION — fields checked at startup before any agent runs
+# --------------------------------------------------------------
+validation:
+  required_fields:
+    - environment.repo_owner
+    - environment.repo_name
+    - environment.service_name
+    - environment.repo_root
+    - jira.site_url
+    - jira.project_key
+  required_paths:
+    - environment.repo_root
